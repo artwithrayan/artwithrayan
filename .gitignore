@@ -1,0 +1,13 @@
+node_modules/
+.env
+*.log
+
+# SQLite local database/runtime files
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+.vscode/
