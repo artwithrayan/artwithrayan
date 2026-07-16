@@ -122,6 +122,7 @@ function normalizeSyncedVariant(product, variant) {
     printfulVariantId: catalogVariantId ? String(catalogVariantId) : "",
     printfulSyncVariantId: syncVariantId ? String(syncVariantId) : "",
     printfulProductId: syncProductId ? String(syncProductId) : "",
+    printfulOptions: Array.isArray(variant.options) ? variant.options : [],
     printfulCurrency: currency,
     printFileUrl: "",
     artworkKey: artworkKeyFromProductName(productName)
@@ -139,9 +140,15 @@ async function getStoreProductDetails(productId) {
 }
 
 function shippingRateItem(print) {
-  if (print.printfulVariantId) return { variant_id: Number(print.printfulVariantId), quantity: 1 };
-  if (print.printfulSyncVariantId) return { external_variant_id: String(print.printfulSyncVariantId), quantity: 1 };
-  return null;
+  const item = print.printfulVariantId
+    ? { variant_id: Number(print.printfulVariantId), quantity: 1 }
+    : print.printfulSyncVariantId
+      ? { external_variant_id: String(print.printfulSyncVariantId), quantity: 1 }
+      : null;
+  if (!item) return null;
+  const options = Array.isArray(print.printfulOptions) ? print.printfulOptions.filter((option) => option?.id && option.value !== undefined) : [];
+  if (options.length) item.options = options;
+  return item;
 }
 
 async function getShippingRatesForPrint({ print, recipient, currency = "USD" }) {
@@ -232,7 +239,9 @@ async function createDraftOrderFromStripeSession({ payment, print, stripeSession
   try { shippingJson = payment.shipping_json ? JSON.parse(payment.shipping_json) : {}; } catch { shippingJson = {}; }
 
   if (print.printfulSyncVariantId) {
-    const payload = { shipping: shippingJson.method || undefined, recipient, items: [{ sync_variant_id: Number(print.printfulSyncVariantId), quantity: 1 }] };
+    const item = { sync_variant_id: Number(print.printfulSyncVariantId), quantity: 1 };
+    if (Array.isArray(print.printfulOptions) && print.printfulOptions.length) item.options = print.printfulOptions;
+    const payload = { shipping: shippingJson.method || undefined, recipient, items: [item] };
     const data = await printfulFetch("/orders?confirm=false", { method: "POST", body: JSON.stringify(payload) });
     return { printfulOrderId: data?.result?.id || data?.id || data?.data?.id, data };
   }

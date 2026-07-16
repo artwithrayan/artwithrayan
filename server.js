@@ -475,6 +475,27 @@ app.get("/api/health", (req, res) => res.json({
   fromEmail: process.env.FROM_EMAIL || "Rayan Rao Art <onboarding@resend.dev>"
 }));
 
+app.get("/api/site-content", (req, res) => res.json({ content: db.getSiteContent() }));
+
+app.get("/api/admin/site-content", requireAdmin, (req, res) => res.json({ content: db.getSiteContent() }));
+
+app.put("/api/admin/site-content", requireAdmin, (req, res) => {
+  const body = req.body || {};
+  const clean = {
+    announcement: String(body.announcement || "").trim(),
+    heroTitle: String(body.heroTitle || "").trim(),
+    heroBlurb: String(body.heroBlurb || "").trim(),
+    bannerImages: Array.isArray(body.bannerImages) ? body.bannerImages.slice(0, 4).map((url) => String(url || "").trim()) : [],
+    aboutLabel: String(body.aboutLabel || "").trim(),
+    aboutTitle: String(body.aboutTitle || "").trim(),
+    aboutBody: String(body.aboutBody || "").trim(),
+    aboutSecondary: String(body.aboutSecondary || "").trim(),
+    aboutImage: String(body.aboutImage || "").trim()
+  };
+  if (!clean.heroTitle || !clean.heroBlurb || !clean.aboutTitle || !clean.aboutBody) return res.status(400).json({ error: "Hero and About text are required." });
+  res.json({ content: db.updateSiteContent(clean) });
+});
+
 app.get("/api/originals", (req, res) => {
   const originals = db.getOriginals().map((art) => ({ ...art, currentBid: db.getCurrentBid(art.id) }));
   res.json({ originals });
@@ -509,7 +530,7 @@ app.post("/api/bidders/register", async (req, res) => {
   if (!shippingLine1 || !shippingCity || !shippingState || !shippingPostalCode) {
     return res.status(400).json({ error: "Shipping address is required because winners are charged shipping and packaging." });
   }
-  if (shippingCountry !== "US") return res.status(400).json({ error: "This prototype currently supports US shipping only." });
+  if (shippingCountry !== "US") return res.status(400).json({ error: "This checkout currently supports US shipping only." });
 
   let existingBidder = db.getBidderByEmail(emailAddress);
   let customerId = existingBidder?.stripeCustomerId || "";

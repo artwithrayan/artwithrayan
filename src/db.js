@@ -134,6 +134,12 @@ CREATE TABLE IF NOT EXISTS auction_charge_attempts (
   updated_at TEXT,
   UNIQUE(original_id, bid_id)
 );
+
+CREATE TABLE IF NOT EXISTS site_settings (
+  setting_key TEXT PRIMARY KEY,
+  setting_value TEXT NOT NULL,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 `);
 
 function ensureColumn(table, column, definition) {
@@ -141,6 +147,33 @@ function ensureColumn(table, column, definition) {
   if (!columns.includes(column)) {
     db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
   }
+}
+
+const defaultSiteContent = {
+  announcement: "ORIGINALS BY AUCTION · PRINTS MADE TO ORDER · ART BY RAYAN RAO",
+  heroTitle: "RAYAN RAO",
+  heroBlurb: "Original paintings by auction. Made-to-order prints fulfilled through Printful.",
+  bannerImages: ["", "", "", ""],
+  aboutLabel: "About",
+  aboutTitle: "About the artist",
+  aboutBody: "Rayan Rao is an artist whose work combines portraiture, expressive realism, and visual storytelling. His paintings explore identity, memory, imagination, and emotion through detailed compositions and bold, personal imagery.",
+  aboutSecondary: "Original paintings are released as one-of-one auction pieces. Prints and products are sold separately at fixed prices through made-to-order fulfillment.",
+  aboutImage: ""
+};
+
+function getSiteContent() {
+  const row = db.prepare(`SELECT setting_value FROM site_settings WHERE setting_key='homepage'`).get();
+  if (!row) {
+    db.prepare(`INSERT INTO site_settings (setting_key, setting_value) VALUES ('homepage', ?)`).run(JSON.stringify(defaultSiteContent));
+    return { ...defaultSiteContent };
+  }
+  try { return { ...defaultSiteContent, ...JSON.parse(row.setting_value) }; } catch { return { ...defaultSiteContent }; }
+}
+
+function updateSiteContent(content) {
+  const next = { ...defaultSiteContent, ...content, bannerImages: Array.isArray(content.bannerImages) ? content.bannerImages.slice(0, 4) : defaultSiteContent.bannerImages };
+  db.prepare(`INSERT INTO site_settings (setting_key, setting_value, updated_at) VALUES ('homepage', ?, CURRENT_TIMESTAMP) ON CONFLICT(setting_key) DO UPDATE SET setting_value=excluded.setting_value, updated_at=CURRENT_TIMESTAMP`).run(JSON.stringify(next));
+  return next;
 }
 
 // Migration-safe updates for older local databases.
@@ -165,8 +198,10 @@ ensureColumn("prints", "status", "TEXT NOT NULL DEFAULT 'active'");
 ensureColumn("prints", "printful_variant_id", "TEXT");
 ensureColumn("prints", "printful_sync_variant_id", "TEXT");
 ensureColumn("prints", "printful_product_id", "TEXT");
+ensureColumn("prints", "printful_options", "TEXT NOT NULL DEFAULT '[]'");
 ensureColumn("prints", "artwork_key", "TEXT NOT NULL DEFAULT ''");
 ensureColumn("prints", "image_urls", "TEXT NOT NULL DEFAULT '[]'");
+db.prepare(`UPDATE prints SET description='Made-to-order archival-style print fulfilled through Printful.' WHERE description LIKE '%after setup%'`).run();
 ensureColumn("prints", "printful_currency", "TEXT");
 ensureColumn("prints", "print_file_url", "TEXT");
 ensureColumn("prints", "source", "TEXT NOT NULL DEFAULT 'manual'");
@@ -274,7 +309,7 @@ if (db.prepare("SELECT COUNT(*) AS count FROM prints").get().count === 0) {
       productType: "Fine art paper print",
       sizes: "8×10, 11×14, 16×20",
       price: 35,
-      description: "Made-to-order archival-style print. Stripe collects payment; Printful can fulfill after setup.",
+      description: "Made-to-order archival-style print fulfilled through Printful.",
       checkoutUrl: "",
       imageUrl: "",
       colorOne: "#d9d9d9",
@@ -367,6 +402,7 @@ function mapPrint(row) {
     printfulVariantId: row.printful_variant_id,
     printfulSyncVariantId: row.printful_sync_variant_id,
     printfulProductId: row.printful_product_id,
+    printfulOptions: (() => { try { return JSON.parse(row.printful_options || "[]"); } catch { return []; } })(),
     artworkKey: row.artwork_key || "",
     printfulCurrency: row.printful_currency,
     printFileUrl: row.print_file_url,
@@ -618,6 +654,7 @@ function upsertPrintfulPrint(item) {
     printfulVariantId: item.printfulVariantId ? String(item.printfulVariantId) : "",
     printfulSyncVariantId: item.printfulSyncVariantId ? String(item.printfulSyncVariantId) : "",
     printfulProductId: item.printfulProductId ? String(item.printfulProductId) : "",
+    printfulOptions: JSON.stringify(Array.isArray(item.printfulOptions) ? item.printfulOptions : []),
     artworkKey: item.artworkKey ? String(item.artworkKey) : "",
     imageUrls: JSON.stringify(item.imageUrls?.length ? item.imageUrls : (item.imageUrl ? [item.imageUrl] : [])),
     printfulCurrency: item.printfulCurrency || "USD",
@@ -640,6 +677,7 @@ function upsertPrintfulPrint(item) {
           printful_variant_id=@printfulVariantId,
           printful_sync_variant_id=@printfulSyncVariantId,
           printful_product_id=@printfulProductId,
+          printful_options=@printfulOptions,
           artwork_key=CASE WHEN @artworkKey <> '' THEN @artworkKey ELSE artwork_key END,
           image_urls=CASE WHEN @imageUrls <> '[]' THEN @imageUrls ELSE image_urls END,
           printful_currency=@printfulCurrency,
@@ -657,9 +695,9 @@ function upsertPrintfulPrint(item) {
 
   db.prepare(`
     INSERT INTO prints
-    (id,title,product_type,sizes,price,description,checkout_url,image_url,image_urls,color_one,color_two,printful_variant_id,printful_sync_variant_id,printful_product_id,artwork_key,printful_currency,print_file_url,source,status,is_active,printful_synced_at,created_at,updated_at)
+    (id,title,product_type,sizes,price,description,checkout_url,image_url,image_urls,color_one,color_two,printful_variant_id,printful_sync_variant_id,printful_product_id,printful_options,artwork_key,printful_currency,print_file_url,source,status,is_active,printful_synced_at,created_at,updated_at)
     VALUES
-    (@id,@title,@productType,@sizes,@price,@description,@checkoutUrl,@imageUrl,@imageUrls,@colorOne,@colorTwo,@printfulVariantId,@printfulSyncVariantId,@printfulProductId,@artworkKey,@printfulCurrency,@printFileUrl,@source,'active',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)
+    (@id,@title,@productType,@sizes,@price,@description,@checkoutUrl,@imageUrl,@imageUrls,@colorOne,@colorTwo,@printfulVariantId,@printfulSyncVariantId,@printfulProductId,@printfulOptions,@artworkKey,@printfulCurrency,@printFileUrl,@source,'active',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)
   `).run(payload);
 
   return { action: "created", id: payload.id, title: payload.title };
@@ -971,5 +1009,7 @@ module.exports = {
   markPaymentPaid,
   setPaymentPrintfulOrderId,
   getLatestPaymentForOriginal,
+  getSiteContent,
+  updateSiteContent,
   getPaidPaymentForOriginal
 };

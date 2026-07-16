@@ -27,6 +27,25 @@
     <button type="submit">Load admin dashboard</button>
   </form>
 
+  <section class="admin-card website-editor-card">
+    <div class="editor-card-heading"><div><p class="section-label">Website Editor</p><h2>Homepage</h2><p class="notice">Hover over an editable area in the live preview to change it.</p></div><button type="button" id="saveSiteContent" disabled>Save Homepage</button></div>
+    <div class="website-editor-layout">
+      <div class="website-preview-wrap"><iframe id="websitePreview" class="website-preview" title="Homepage preview" src="index.html?adminPreview=1"></iframe></div>
+      <form id="siteContentForm" class="artwork-form">
+        <label>Announcement<input name="announcement" placeholder="Top announcement"></label>
+        <label>Hero title<input name="heroTitle" placeholder="Homepage title"></label>
+        <label>Hero blurb<textarea name="heroBlurb" rows="3"></textarea></label>
+        <label>Banner image URL<input name="bannerImage0" placeholder="Large homepage banner image URL"></label>
+        <label>About label<input name="aboutLabel"></label>
+        <label>About heading<input name="aboutTitle"></label>
+        <label>About image URL<input name="aboutImage" placeholder="Artist photo URL"></label>
+        <label>About text<textarea name="aboutBody" rows="5"></textarea></label>
+        <label>About second paragraph<textarea name="aboutSecondary" rows="4"></textarea></label>
+        <p class="notice" id="siteContentNotice"></p>
+      </form>
+    </div>
+  </section>
+
   <section class="admin-card">
     <h3>Artwork Manager</h3>
     <p class="notice">Add real original paintings here. Use an HTTPS image URL from Cloudinary, your website, or another image host. Use Draft until you are ready to publish.</p>
@@ -38,6 +57,7 @@
       <input name="year" placeholder="Year" value="2026" required>
       <textarea name="description" placeholder="Description" required></textarea>
       <input name="imageUrl" placeholder="Image URL, e.g. https://...">
+      <div id="artworkImagePreview" class="artwork-image-preview"><span>Artwork preview appears here</span></div>
       <div class="form-grid">
         <input name="startingBid" type="number" min="1" placeholder="Starting bid" required>
         <input name="bidIncrement" type="number" min="1" placeholder="Bid increment" value="10" required>
@@ -159,6 +179,61 @@ function artworkFormPayload() {
     autoChargeEnabled: fd.get("autoChargeEnabled") === "on"
   };
 }
+
+function siteContentPayload() {
+  const form = document.getElementById("siteContentForm");
+  const fd = new FormData(form);
+  return {
+    announcement: fd.get("announcement"), heroTitle: fd.get("heroTitle"), heroBlurb: fd.get("heroBlurb"),
+    bannerImages: [fd.get("bannerImage0"), fd.get("bannerImage1"), fd.get("bannerImage2"), fd.get("bannerImage3")],
+    aboutLabel: fd.get("aboutLabel"), aboutTitle: fd.get("aboutTitle"), aboutImage: fd.get("aboutImage"), aboutBody: fd.get("aboutBody"), aboutSecondary: fd.get("aboutSecondary")
+  };
+}
+
+function populateSiteContent(content) {
+  const form = document.getElementById("siteContentForm");
+  Object.entries({ announcement: content.announcement, heroTitle: content.heroTitle, heroBlurb: content.heroBlurb, bannerImage0: content.bannerImages?.[0], bannerImage1: content.bannerImages?.[1], bannerImage2: content.bannerImages?.[2], bannerImage3: content.bannerImages?.[3], aboutLabel: content.aboutLabel, aboutTitle: content.aboutTitle, aboutImage: content.aboutImage, aboutBody: content.aboutBody, aboutSecondary: content.aboutSecondary }).forEach(([name, value]) => { if (form.elements[name]) form.elements[name].value = value || ""; });
+}
+
+async function loadSiteContent() {
+  const data = await fetchAdmin("/api/admin/site-content");
+  populateSiteContent(data.content);
+  decorateWebsitePreview();
+}
+
+async function saveSiteContent() {
+  const notice = document.getElementById("siteContentNotice");
+  notice.className = "notice"; notice.textContent = "Saving homepage...";
+  try {
+    const data = await fetchAdmin("/api/admin/site-content", { method: "PUT", body: JSON.stringify(siteContentPayload()) });
+    populateSiteContent(data.content); notice.className = "notice success"; notice.textContent = "Homepage saved.";
+    document.getElementById("websitePreview").contentWindow.location.reload();
+  } catch (error) { notice.className = "notice error"; notice.textContent = error.message; }
+}
+
+function focusSiteEditor(key) {
+  const map = { announcement: "announcement", heroTitle: "heroTitle", heroBlurb: "heroBlurb", "aboutLabel": "aboutLabel", "aboutTitle": "aboutTitle", "aboutBody": "aboutBody", "aboutSecondary": "aboutSecondary", "aboutImage": "aboutImage" };
+  const name = key.startsWith("bannerImages.") ? `bannerImage${key.split(".")[1]}` : map[key];
+  const field = name && document.querySelector(`#siteContentForm [name='${name}']`);
+  if (field) { field.focus(); field.scrollIntoView({ behavior: "smooth", block: "center" }); }
+}
+
+function decorateWebsitePreview() {
+  const frame = document.getElementById("websitePreview");
+  let doc;
+  try { doc = frame.contentDocument; } catch { return; }
+  if (!doc?.body) return;
+  if (!doc.getElementById("adminPreviewStyles")) {
+    const style = doc.createElement("style"); style.id = "adminPreviewStyles"; style.textContent = `[data-edit-key]{position:relative;outline:1px solid transparent;transition:outline .15s,background .15s}[data-edit-key]:hover{outline:2px solid #111;background:rgba(255,255,255,.72)}.admin-edit-button{position:absolute;right:8px;top:8px;z-index:99;display:none;padding:7px 10px;background:#111;color:#fff;border:0;font:12px Arial;cursor:pointer}.admin-edit-button-parent:hover .admin-edit-button{display:block}`; doc.head.appendChild(style);
+  }
+  doc.querySelectorAll("[data-edit-key]").forEach((element) => {
+    if (element.querySelector(":scope > .admin-edit-button")) return;
+    element.classList.add("admin-edit-button-parent");
+    const button = doc.createElement("button"); button.className = "admin-edit-button"; button.type = "button"; button.textContent = "Edit"; button.addEventListener("click", (event) => { event.preventDefault(); event.stopPropagation(); window.parent.postMessage({ type: "edit-site", key: element.dataset.editKey }, "*"); }); element.appendChild(button);
+  });
+}
+
+window.addEventListener("message", (event) => { if (event.data?.type === "edit-site") focusSiteEditor(event.data.key); });
 function resetArtworkForm() {
   editingArtworkId = null;
   document.getElementById("artworkForm").reset();
@@ -170,6 +245,12 @@ function resetArtworkForm() {
   document.querySelector("#artworkForm [name='autoChargeEnabled']").checked = true;
   document.getElementById("saveArtwork").textContent = "Add Artwork";
   document.getElementById("artworkNotice").textContent = "";
+  updateArtworkImagePreview();
+}
+function updateArtworkImagePreview() {
+  const preview = document.getElementById("artworkImagePreview");
+  const url = document.querySelector("#artworkForm [name='imageUrl']")?.value.trim();
+  preview.innerHTML = url ? `<img src="${escapeHtml(url)}" alt="Artwork preview"><span class="preview-fallback">Preview</span>` : "<span>Artwork preview appears here</span>";
 }
 function editArtwork(id) {
   const art = currentOriginals.find((item) => item.id === id);
@@ -184,6 +265,7 @@ function editArtwork(id) {
   form.elements.year.value = art.year || "";
   form.elements.description.value = art.description || "";
   form.elements.imageUrl.value = art.imageUrl || "";
+  updateArtworkImagePreview();
   form.elements.startingBid.value = art.startingBid || "";
   form.elements.bidIncrement.value = art.bidIncrement || 10;
   form.elements.endsAt.value = toDatetimeLocal(art.endsAt);
@@ -237,8 +319,8 @@ async function previewShippingEstimate() {
 
 async function loadDashboard(event) {
   event.preventDefault();
-  ["syncPrintful", "loadPrints", "loadBidders", "processEnded", "saveArtwork", "resetArtwork", "estimateShipping", "testEmailButton"].forEach((id) => document.getElementById(id).disabled = false);
-  await Promise.all([loadAuctions(), loadPrints(), loadBidders()]);
+  ["syncPrintful", "loadPrints", "loadBidders", "processEnded", "saveArtwork", "resetArtwork", "estimateShipping", "testEmailButton", "saveSiteContent"].forEach((id) => document.getElementById(id).disabled = false);
+  await Promise.all([loadAuctions(), loadPrints(), loadBidders(), loadSiteContent()]);
 }
 
 async function sendTestEmail(event) {
@@ -396,6 +478,9 @@ document.getElementById("syncPrintful").addEventListener("click", syncPrintfulPr
 document.getElementById("loadPrints").addEventListener("click", loadPrints);
 document.getElementById("loadBidders").addEventListener("click", loadBidders);
 document.getElementById("processEnded").addEventListener("click", processEndedAuctions);
+document.getElementById("saveSiteContent").addEventListener("click", saveSiteContent);
+document.getElementById("websitePreview").addEventListener("load", decorateWebsitePreview);
+document.querySelector("#artworkForm [name='imageUrl']").addEventListener("input", updateArtworkImagePreview);
 resetArtworkForm();
 </script>
 </body>

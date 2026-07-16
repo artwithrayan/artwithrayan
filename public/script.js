@@ -326,8 +326,35 @@ function updateCountdowns() {
   document.querySelectorAll(".countdown[data-ends]").forEach((el) => { if (el.textContent.toLowerCase() !== "sold") el.textContent = timeRemaining(el.dataset.ends); });
 }
 
+async function loadSiteContent() {
+  if (!document.querySelector("[data-edit-key]")) return;
+  try {
+    const { content } = await fetchJson(`${API}/api/site-content`);
+    const textKeys = ["announcement", "heroTitle", "heroBlurb", "aboutLabel", "aboutTitle", "aboutBody", "aboutSecondary"];
+    textKeys.forEach((key) => { const element = document.querySelector(`[data-edit-key='${key}']`); if (element && content[key]) element.textContent = content[key]; });
+    const banner = document.querySelector("[data-edit-key='bannerImages.0']");
+    if (banner && content.bannerImages?.[0]) { banner.style.backgroundImage = `url("${content.bannerImages[0]}")`; banner.classList.add("has-image"); }
+    const aboutImage = document.querySelector("[data-edit-key='aboutImage']");
+    if (aboutImage && content.aboutImage) { aboutImage.innerHTML = `<img src="${content.aboutImage}" alt="Rayan Rao">`; aboutImage.classList.add("has-image"); }
+  } catch { /* Keep the built-in homepage copy if the API is unavailable. */ }
+}
+
 const year = document.getElementById("year");
 if (year) year.textContent = new Date().getFullYear();
+loadSiteContent();
 renderOriginals();
 renderPrints();
 setInterval(updateCountdowns, 60000);
+
+// Reduce casual image saving without blocking normal text selection or checkout fields.
+document.addEventListener("contextmenu", (event) => {
+  if (event.target.closest("img, .art-image, .product-preview, .banner-image, .portrait-placeholder")) event.preventDefault();
+});
+document.addEventListener("dragstart", (event) => {
+  if (event.target.closest("img, .art-image, .product-preview, .banner-image, .portrait-placeholder")) event.preventDefault();
+});
+document.addEventListener("keydown", (event) => {
+  const key = event.key.toLowerCase();
+  const blockedShortcut = event.ctrlKey || event.metaKey;
+  if ((blockedShortcut && ["s", "u"].includes(key)) || event.key === "F12" || (event.ctrlKey && event.shiftKey && ["i", "j", "c"].includes(key))) event.preventDefault();
+});
