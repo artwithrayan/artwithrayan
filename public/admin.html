@@ -287,6 +287,20 @@ async function loadBidders() {
         catch (error) { notice.className = "notice error"; notice.textContent = error.message; }
       });
     });
+    document.querySelectorAll("#printResults .admin-card").forEach((card, index) => {
+      const item = data.prints[index];
+      const controls = document.createElement("div");
+      controls.className = "admin-actions";
+      controls.innerHTML = `<input class="artwork-group-input" value="${escapeHtml(item.artworkKey || "")}" placeholder="Artwork group, e.g. testflag" /><button type="button">Save artwork group</button><span class="notice"></span>`;
+      const saveButton = controls.querySelector("button"), notice = controls.querySelector(".notice");
+      saveButton.addEventListener("click", async () => {
+        try {
+          await fetchAdmin(`/api/admin/prints/${item.id}/artwork-group`, { method: "PUT", body: JSON.stringify({ artworkKey: controls.querySelector("input").value }) });
+          notice.className = "notice success"; notice.textContent = "Saved. Refresh the Prints page to see the grouping.";
+        } catch (error) { notice.className = "notice error"; notice.textContent = error.message; }
+      });
+      card.appendChild(controls);
+    });
   } catch (error) { results.innerHTML = `<p class="notice error">${escapeHtml(error.message)}</p>`; }
 }
 

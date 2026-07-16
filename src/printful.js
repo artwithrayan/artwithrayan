@@ -74,10 +74,24 @@ function pickImageUrl(product, variant) {
   return firstDefined(variant.thumbnail_url, variant.preview_url, firstFile.preview_url, firstFile.thumbnail_url, product.thumbnail_url, product.preview_url, "");
 }
 
+function pickImageUrls(product, variant) {
+  const files = toArray(variant.files);
+  const fullSize = [variant.preview_url, ...files.flatMap((file) => [file.preview_url, file.url]), product.preview_url].filter(Boolean);
+  if (fullSize.length) return [...new Set(fullSize)];
+  const fallback = [variant.thumbnail_url, ...files.map((file) => file.thumbnail_url), product.thumbnail_url].filter(Boolean);
+  return [...new Set(fallback)];
+}
+
 function pickSize(productName, variantName) {
   const text = `${productName || ""} ${variantName || ""}`;
   const match = text.match(/\b\d{1,2}\s*[x×]\s*\d{1,2}\b/i);
   return match ? match[0].replace(/\s+/g, "") : "See Printful product";
+}
+
+function artworkKeyFromProductName(productName) {
+  const match = String(productName || "").match(/[\"“]([^\"”]+)[\"”]/);
+  if (!match) return "";
+  return match[1].trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
 }
 
 function normalizeSyncedVariant(product, variant) {
@@ -102,13 +116,15 @@ function normalizeSyncedVariant(product, variant) {
     description: "Made-to-order product fulfilled through Printful.",
     checkoutUrl: "",
     imageUrl: pickImageUrl(product, variant),
+    imageUrls: pickImageUrls(product, variant),
     colorOne: "#f4f4f4",
     colorTwo: "#d8d8d8",
     printfulVariantId: catalogVariantId ? String(catalogVariantId) : "",
     printfulSyncVariantId: syncVariantId ? String(syncVariantId) : "",
     printfulProductId: syncProductId ? String(syncProductId) : "",
     printfulCurrency: currency,
-    printFileUrl: ""
+    printFileUrl: "",
+    artworkKey: artworkKeyFromProductName(productName)
   };
 }
 
@@ -119,6 +135,32 @@ async function getStoreProducts() {
 
 async function getStoreProductDetails(productId) {
   const data = await printfulFetch(`/store/products/${productId}`);
+  return data?.result || data?.data || data;
+}
+
+function shippingRateItem(print) {
+  if (print.printfulVariantId) return { variant_id: Number(print.printfulVariantId), quantity: 1 };
+  if (print.printfulSyncVariantId) return { external_variant_id: String(print.printfulSyncVariantId), quantity: 1 };
+  return null;
+}
+
+async function getShippingRatesForPrint({ print, recipient, currency = "USD" }) {
+  const item = shippingRateItem(print);
+  if (!item) throw new Error("This print is missing its Printful variant information.");
+  const data = await printfulFetch("/shipping/rates", {
+    method: "POST",
+    body: JSON.stringify({ recipient, items: [item], currency, locale: "en_US" })
+  });
+  return toArray(data?.result || data?.data || data);
+}
+
+async function estimatePrintCosts({ print, recipient, shippingMethod = "STANDARD" }) {
+  const item = shippingRateItem(print);
+  if (!item) throw new Error("This print is missing its Printful variant information.");
+  const data = await printfulFetch("/orders/estimate-costs", {
+    method: "POST",
+    body: JSON.stringify({ shipping: shippingMethod, recipient, items: [item] })
+  });
   return data?.result || data?.data || data;
 }
 
@@ -186,14 +228,17 @@ async function createDraftOrderFromStripeSession({ payment, print, stripeSession
     zip: address.postal_code
   };
 
+  let shippingJson = {};
+  try { shippingJson = payment.shipping_json ? JSON.parse(payment.shipping_json) : {}; } catch { shippingJson = {}; }
+
   if (print.printfulSyncVariantId) {
-    const payload = { recipient, items: [{ sync_variant_id: Number(print.printfulSyncVariantId), quantity: 1 }] };
+    const payload = { shipping: shippingJson.method || undefined, recipient, items: [{ sync_variant_id: Number(print.printfulSyncVariantId), quantity: 1 }] };
     const data = await printfulFetch("/orders?confirm=false", { method: "POST", body: JSON.stringify(payload) });
     return { printfulOrderId: data?.result?.id || data?.id || data?.data?.id, data };
   }
 
   if (print.printfulVariantId && print.printFileUrl) {
-    const payload = { recipient, items: [{ variant_id: Number(print.printfulVariantId), quantity: 1, files: [{ url: print.printFileUrl }] }] };
+    const payload = { shipping: shippingJson.method || undefined, recipient, items: [{ variant_id: Number(print.printfulVariantId), quantity: 1, files: [{ url: print.printFileUrl }] }] };
     const data = await printfulFetch("/orders?confirm=false", { method: "POST", body: JSON.stringify(payload) });
     return { printfulOrderId: data?.result?.id || data?.id || data?.data?.id, data };
   }
@@ -202,4 +247,4 @@ async function createDraftOrderFromStripeSession({ payment, print, stripeSession
   return { skipped: true, reason: "Missing Printful sync variant data." };
 }
 
-module.exports = { printfulFetch, getStoreProducts, getStoreProductDetails, fetchPrintfulProductsForWebsite, createDraftOrderFromStripeSession };
+module.exports = { printfulFetch, getStoreProducts, getStoreProductDetails, fetchPrintfulProductsForWebsite, getShippingRatesForPrint, estimatePrintCosts, createDraftOrderFromStripeSession };

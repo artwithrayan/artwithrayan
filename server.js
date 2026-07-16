@@ -367,6 +367,7 @@ app.post("/api/stripe/webhook", express.raw({ type: "application/json" }), async
   }
 
   try {
+    console.log(`[stripe webhook] received ${event.type}${event.data?.object?.id ? ` (${event.data.object.id})` : ""}`);
     if (event.type === "checkout.session.completed") {
       const session = event.data.object;
 
@@ -418,8 +419,10 @@ app.post("/api/stripe/webhook", express.raw({ type: "application/json" }), async
 
       if (session.mode === "payment") {
         const payment = db.getPaymentByStripeSessionId(session.id);
-        if (payment && payment.status !== "paid") {
-          db.markPaymentPaid(session.id);
+        const shouldProcessPrintful = payment?.kind === "print" && !payment.printful_order_id;
+        if (payment && (payment.status !== "paid" || shouldProcessPrintful)) {
+          const wasAlreadyPaid = payment.status === "paid";
+          if (!wasAlreadyPaid) db.markPaymentPaid(session.id);
           if (payment.kind === "original") {
             const original = db.getOriginalById(payment.original_id);
             db.markOriginalSold(payment.original_id);
@@ -433,15 +436,19 @@ app.post("/api/stripe/webhook", express.raw({ type: "application/json" }), async
 
           if (payment.kind === "print") {
             const print = db.getPrintById(payment.print_id);
-            await email.sendBuyerReceiptEmail({
-              to: session.customer_details?.email || payment.customer_email,
-              subject: `Order received for ${print.title}`,
-              heading: "Order received",
-              body: `Thank you for ordering ${print.title}. Your order has been received.`
-            });
+            console.log(`[print order] paid session=${session.id} print=${print?.title || payment.print_id}`);
+            if (!wasAlreadyPaid) {
+              await email.sendBuyerReceiptEmail({
+                to: session.customer_details?.email || payment.customer_email,
+                subject: `Order received for ${print.title}`,
+                heading: "Order received",
+                body: `Thank you for ordering ${print.title}. Your order has been received.`
+              });
+            }
 
             const printfulResult = await printful.createDraftOrderFromStripeSession({ payment, print, stripeSession: session });
             if (printfulResult?.printfulOrderId) db.setPaymentPrintfulOrderId(payment.id, String(printfulResult.printfulOrderId));
+            console.log(`[print order] Printful result: ${printfulResult?.printfulOrderId ? `draft ${printfulResult.printfulOrderId}` : printfulResult?.reason || "no draft id returned"}`);
           }
         }
       }
@@ -598,25 +605,74 @@ app.get("/api/originals/:id/bids", (req, res) => {
   res.json({ bids });
 });
 
-app.get("/api/prints", (req, res) => res.json({ prints: db.getPrints() }));
+app.get("/api/prints", (req, res) => {
+  const groups = new Map();
+  db.getPrints().forEach((print) => {
+    const key = print.artworkKey || print.id;
+    if (!groups.has(key)) groups.set(key, { key, title: print.artworkKey || print.title, imageUrl: print.imageUrl, colorOne: print.colorOne, colorTwo: print.colorTwo, description: print.description, products: [] });
+    groups.get(key).products.push(print);
+  });
+  res.json({ artworks: [...groups.values()] });
+});
+
+function printShippingRecipient(body) {
+  return { name: String(body.name || "").trim(), address1: String(body.address1 || "").trim(), address2: String(body.address2 || "").trim(), city: String(body.city || "").trim(), state_code: String(body.state || "").trim().toUpperCase(), country_code: String(body.country || "US").trim().toUpperCase(), zip: String(body.postalCode || "").trim(), email: String(body.email || "").trim().toLowerCase() };
+}
+
+function validatePrintShippingRecipient(recipient) {
+  if (recipient.name.length < 2) return "Please enter the recipient name.";
+  if (!validator.isEmail(recipient.email)) return "Please enter a valid email address.";
+  if (!recipient.address1 || !recipient.city || !recipient.state_code || !recipient.zip) return "Please complete the shipping address.";
+  if (recipient.country_code !== "US") return "This checkout currently supports US shipping only.";
+  return null;
+}
+
+async function getPrintShippingQuote(print, body) {
+  const recipient = printShippingRecipient(body);
+  const validationError = validatePrintShippingRecipient(recipient);
+  if (validationError) { const error = new Error(validationError); error.statusCode = 400; throw error; }
+  const rates = await printful.getShippingRatesForPrint({ print, recipient });
+  const rate = rates.find((candidate) => candidate.id === "STANDARD") || rates[0];
+  if (!rate || !Number.isFinite(Number(rate.rate))) throw new Error("Printful did not return a shipping rate for this address.");
+  const estimate = await printful.estimatePrintCosts({ print, recipient, shippingMethod: rate.id });
+  const costs = estimate?.costs || {};
+  const fulfillmentTax = Math.round((Number(costs.tax || 0) + Number(costs.vat || 0)) * 100) / 100;
+  return { recipient, rate, shippingAmount: Math.round(Number(rate.rate) * 100) / 100, fulfillmentTax };
+}
+
+app.post("/api/prints/:id/shipping-rate", async (req, res) => {
+  try {
+    const print = db.getPrintById(req.params.id);
+    if (!print) return res.status(404).json({ error: "Print product not found." });
+    const quote = await getPrintShippingQuote(print, req.body);
+    res.json({ shipping: quote.shippingAmount, fulfillmentTax: quote.fulfillmentTax, product: print.price, total: Math.round((print.price + quote.shippingAmount + quote.fulfillmentTax) * 100) / 100, currency: quote.rate.currency, method: quote.rate.id, name: quote.rate.name, delivery: { min: quote.rate.minDeliveryDays, max: quote.rate.maxDeliveryDays } });
+  } catch (error) { res.status(error.statusCode || 502).json({ error: error.message || "Could not calculate shipping." }); }
+});
 
 app.post("/api/prints/:id/checkout", async (req, res) => {
   if (!requireStripe(res)) return;
   const print = db.getPrintById(req.params.id);
   if (!print) return res.status(404).json({ error: "Print product not found." });
 
-  const customerEmail = String(req.body.customerEmail || "").trim().toLowerCase();
+  let quote;
+  try { quote = await getPrintShippingQuote(print, req.body); }
+  catch (error) { return res.status(error.statusCode || 502).json({ error: error.message || "Could not calculate shipping." }); }
+  const { recipient, rate, shippingAmount, fulfillmentTax } = quote;
+  const customerEmail = recipient.email;
+  const shippingCents = Math.round(shippingAmount * 100);
   const sessionConfig = {
     mode: "payment",
     line_items: [{ price_data: { currency: "usd", unit_amount: Math.round(print.price * 100), product_data: { name: print.title, description: `${print.productType} · ${print.sizes}` } }, quantity: 1 }],
     shipping_address_collection: { allowed_countries: ["US"] },
+    customer_email: customerEmail,
     metadata: { kind: "print", printId: print.id },
     success_url: `${BASE_URL}/success.html?session_id={CHECKOUT_SESSION_ID}`,
     cancel_url: `${BASE_URL}/prints.html`
   };
-  if (validator.isEmail(customerEmail)) sessionConfig.customer_email = customerEmail;
+  sessionConfig.line_items.push({ price_data: { currency: "usd", unit_amount: shippingCents, product_data: { name: "Shipping", description: rate.name || "Printful shipping" } }, quantity: 1 });
+  if (fulfillmentTax > 0) sessionConfig.line_items.push({ price_data: { currency: "usd", unit_amount: Math.round(fulfillmentTax * 100), product_data: { name: "Printful fulfillment tax", description: "Estimated Printful fulfillment tax" } }, quantity: 1 });
   const session = await stripe.checkout.sessions.create(sessionConfig);
-  db.createPayment({ kind: "print", printId: print.id, stripeSessionId: session.id, checkoutUrl: session.url, customerEmail: customerEmail || "", amount: print.price, status: "pending" });
+  db.createPayment({ kind: "print", printId: print.id, stripeSessionId: session.id, checkoutUrl: session.url, customerName: recipient.name, customerEmail, subtotalAmount: print.price, shippingAmount, totalAmount: print.price + shippingAmount + fulfillmentTax, amount: print.price + shippingAmount + fulfillmentTax, shippingJson: { method: rate.id, name: rate.name, rate: shippingAmount, fulfillmentTax, currency: rate.currency }, status: "pending" });
   res.json({ checkoutUrl: session.url });
 });
 
@@ -669,6 +725,15 @@ app.post("/api/admin/shipping/estimate", requireAdmin, (req, res) => {
   } catch (error) {
     res.status(400).json({ error: error.message || "Could not estimate shipping." });
   }
+});
+
+app.put("/api/admin/prints/:id/artwork-group", requireAdmin, (req, res) => {
+  const print = db.getPrintById(req.params.id);
+  if (!print) return res.status(404).json({ error: "Print product not found." });
+  const artworkKey = String(req.body.artworkKey || "").trim().toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "");
+  if (!artworkKey) return res.status(400).json({ error: "Enter an artwork group name." });
+  const updated = db.setPrintArtworkKey(print.id, artworkKey);
+  res.json({ message: "Artwork group updated.", print: updated });
 });
 
 app.post("/api/admin/auctions/process-ended", requireAdmin, async (req, res) => {

@@ -165,6 +165,8 @@ ensureColumn("prints", "status", "TEXT NOT NULL DEFAULT 'active'");
 ensureColumn("prints", "printful_variant_id", "TEXT");
 ensureColumn("prints", "printful_sync_variant_id", "TEXT");
 ensureColumn("prints", "printful_product_id", "TEXT");
+ensureColumn("prints", "artwork_key", "TEXT NOT NULL DEFAULT ''");
+ensureColumn("prints", "image_urls", "TEXT NOT NULL DEFAULT '[]'");
 ensureColumn("prints", "printful_currency", "TEXT");
 ensureColumn("prints", "print_file_url", "TEXT");
 ensureColumn("prints", "source", "TEXT NOT NULL DEFAULT 'manual'");
@@ -359,11 +361,13 @@ function mapPrint(row) {
     description: row.description,
     checkoutUrl: row.checkout_url,
     imageUrl: row.image_url,
+    imageUrls: (() => { try { return JSON.parse(row.image_urls || "[]"); } catch { return row.image_url ? [row.image_url] : []; } })(),
     colorOne: row.color_one,
     colorTwo: row.color_two,
     printfulVariantId: row.printful_variant_id,
     printfulSyncVariantId: row.printful_sync_variant_id,
     printfulProductId: row.printful_product_id,
+    artworkKey: row.artwork_key || "",
     printfulCurrency: row.printful_currency,
     printFileUrl: row.print_file_url,
     source: row.source,
@@ -614,6 +618,8 @@ function upsertPrintfulPrint(item) {
     printfulVariantId: item.printfulVariantId ? String(item.printfulVariantId) : "",
     printfulSyncVariantId: item.printfulSyncVariantId ? String(item.printfulSyncVariantId) : "",
     printfulProductId: item.printfulProductId ? String(item.printfulProductId) : "",
+    artworkKey: item.artworkKey ? String(item.artworkKey) : "",
+    imageUrls: JSON.stringify(item.imageUrls?.length ? item.imageUrls : (item.imageUrl ? [item.imageUrl] : [])),
     printfulCurrency: item.printfulCurrency || "USD",
     printFileUrl: item.printFileUrl || "",
     source: "printful"
@@ -634,6 +640,8 @@ function upsertPrintfulPrint(item) {
           printful_variant_id=@printfulVariantId,
           printful_sync_variant_id=@printfulSyncVariantId,
           printful_product_id=@printfulProductId,
+          artwork_key=CASE WHEN @artworkKey <> '' THEN @artworkKey ELSE artwork_key END,
+          image_urls=CASE WHEN @imageUrls <> '[]' THEN @imageUrls ELSE image_urls END,
           printful_currency=@printfulCurrency,
           print_file_url=@printFileUrl,
           source=@source,
@@ -649,9 +657,9 @@ function upsertPrintfulPrint(item) {
 
   db.prepare(`
     INSERT INTO prints
-    (id,title,product_type,sizes,price,description,checkout_url,image_url,color_one,color_two,printful_variant_id,printful_sync_variant_id,printful_product_id,printful_currency,print_file_url,source,status,is_active,printful_synced_at,created_at,updated_at)
+    (id,title,product_type,sizes,price,description,checkout_url,image_url,image_urls,color_one,color_two,printful_variant_id,printful_sync_variant_id,printful_product_id,artwork_key,printful_currency,print_file_url,source,status,is_active,printful_synced_at,created_at,updated_at)
     VALUES
-    (@id,@title,@productType,@sizes,@price,@description,@checkoutUrl,@imageUrl,@colorOne,@colorTwo,@printfulVariantId,@printfulSyncVariantId,@printfulProductId,@printfulCurrency,@printFileUrl,@source,'active',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)
+    (@id,@title,@productType,@sizes,@price,@description,@checkoutUrl,@imageUrl,@imageUrls,@colorOne,@colorTwo,@printfulVariantId,@printfulSyncVariantId,@printfulProductId,@artworkKey,@printfulCurrency,@printFileUrl,@source,'active',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)
   `).run(payload);
 
   return { action: "created", id: payload.id, title: payload.title };
@@ -660,6 +668,11 @@ function upsertPrintfulPrint(item) {
 function upsertPrintfulPrints(items) {
   const upsertMany = db.transaction((rows) => rows.map((row) => upsertPrintfulPrint(row)));
   return upsertMany(items);
+}
+
+function setPrintArtworkKey(id, artworkKey) {
+  db.prepare(`UPDATE prints SET artwork_key=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`).run(String(artworkKey || "").trim(), id);
+  return db.prepare(`SELECT * FROM prints WHERE id=?`).get(id);
 }
 
 function createOrUpdateBidder({
@@ -941,6 +954,7 @@ module.exports = {
   getPrintById,
   upsertPrintfulPrint,
   upsertPrintfulPrints,
+  setPrintArtworkKey,
   createOrUpdateBidder,
   getBidderById,
   getBidderByEmail,
