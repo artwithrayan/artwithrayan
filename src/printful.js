@@ -70,15 +70,16 @@ function normalizePrice(value) {
 
 function pickImageUrl(product, variant) {
   const files = toArray(variant.files);
-  const firstFile = files.find((file) => file.preview_url || file.thumbnail_url || file.url) || {};
-  return firstDefined(variant.thumbnail_url, variant.preview_url, firstFile.preview_url, firstFile.thumbnail_url, product.thumbnail_url, product.preview_url, "");
+  const mockupFile = files.find((file) => file.type === "preview" && (file.preview_url || file.thumbnail_url || file.url)) || {};
+  return firstDefined(mockupFile.preview_url, mockupFile.thumbnail_url, variant.preview_url, variant.thumbnail_url, product.thumbnail_url, product.preview_url, "");
 }
 
 function pickImageUrls(product, variant) {
   const files = toArray(variant.files);
-  const fullSize = [variant.preview_url, ...files.flatMap((file) => [file.preview_url, file.url]), product.preview_url].filter(Boolean);
+  const mockupFiles = files.filter((file) => file.type === "preview");
+  const fullSize = [variant.preview_url, ...mockupFiles.map((file) => file.preview_url), product.preview_url].filter(Boolean);
   if (fullSize.length) return [...new Set(fullSize)];
-  const fallback = [variant.thumbnail_url, ...files.map((file) => file.thumbnail_url), product.thumbnail_url].filter(Boolean);
+  const fallback = [variant.thumbnail_url, ...mockupFiles.map((file) => file.thumbnail_url), product.thumbnail_url].filter(Boolean);
   return [...new Set(fallback)];
 }
 
@@ -111,7 +112,7 @@ function normalizeSyncedVariant(product, variant) {
     id: `printful-${syncVariantId || syncProductId}`,
     title: combinedTitle,
     productType: productName,
-    sizes: pickSize(productName, variantName),
+    sizes: variant.size || pickSize(productName, variantName),
     price: normalizePrice(retailPrice),
     description: "Made-to-order product fulfilled through Printful.",
     checkoutUrl: "",

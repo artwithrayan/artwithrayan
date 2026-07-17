@@ -91,7 +91,29 @@ function estimateOriginalShipping(original) {
   };
 }
 
+function estimateSelfFulfillmentShipping(product, recipient = {}) {
+  const base = estimateOriginalShipping({
+    size: `${product.widthIn || 12} x ${product.heightIn || 8} x ${product.depthIn || 1}`,
+    widthIn: product.widthIn,
+    heightIn: product.heightIn,
+    depthIn: product.depthIn,
+    weightLb: product.weightLb || 1
+  });
+  const state = String(recipient.state_code || "").toUpperCase();
+  const zoneSurcharge = ["AK", "HI"].includes(state) ? 18 : ["WA", "OR", "CA", "NV", "AZ"].includes(state) ? 4 : 0;
+  const total = base.total + zoneSurcharge;
+
+  return {
+    ...base,
+    total,
+    packageType: `${base.packageType} · self-fulfilled`,
+    breakdown: { ...base.breakdown, addressZoneSurcharge: zoneSurcharge },
+    note: "Estimated domestic US shipping and packing charge based on the product profile, destination state, packing materials, labor, carrier estimate, and a small buffer. This is not a live carrier quote."
+  };
+}
+
 module.exports = {
   parseSizeInches,
-  estimateOriginalShipping
+  estimateOriginalShipping,
+  estimateSelfFulfillmentShipping
 };

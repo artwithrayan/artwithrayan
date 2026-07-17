@@ -1,6 +1,7 @@
 const API = "";
 
 function money(value) { return `$${Number(value).toLocaleString()}`; }
+function escapeHtml(value) { return String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#039;"); }
 
 const US_STATE_OPTIONS = `<option value="">State</option><option value="AL">Alabama</option><option value="AK">Alaska</option><option value="AZ">Arizona</option><option value="AR">Arkansas</option><option value="CA">California</option><option value="CO">Colorado</option><option value="CT">Connecticut</option><option value="DE">Delaware</option><option value="FL">Florida</option><option value="GA">Georgia</option><option value="HI">Hawaii</option><option value="ID">Idaho</option><option value="IL">Illinois</option><option value="IN">Indiana</option><option value="IA">Iowa</option><option value="KS">Kansas</option><option value="KY">Kentucky</option><option value="LA">Louisiana</option><option value="ME">Maine</option><option value="MD">Maryland</option><option value="MA">Massachusetts</option><option value="MI">Michigan</option><option value="MN">Minnesota</option><option value="MS">Mississippi</option><option value="MO">Missouri</option><option value="MT">Montana</option><option value="NE">Nebraska</option><option value="NV">Nevada</option><option value="NH">New Hampshire</option><option value="NJ">New Jersey</option><option value="NM">New Mexico</option><option value="NY">New York</option><option value="NC">North Carolina</option><option value="ND">North Dakota</option><option value="OH">Ohio</option><option value="OK">Oklahoma</option><option value="OR">Oregon</option><option value="PA">Pennsylvania</option><option value="RI">Rhode Island</option><option value="SC">South Carolina</option><option value="SD">South Dakota</option><option value="TN">Tennessee</option><option value="TX">Texas</option><option value="UT">Utah</option><option value="VT">Vermont</option><option value="VA">Virginia</option><option value="WA">Washington</option><option value="WV">West Virginia</option><option value="WI">Wisconsin</option><option value="WY">Wyoming</option>`;
 
@@ -192,9 +193,14 @@ function attachArtworkPurchaseHandlers(artworks) {
       if (!artwork) return;
       const dialog = ensurePrintDialog();
       const firstProduct = artwork.products[0];
-      const options = artwork.products.map((product) => `<option value="${product.id}">${product.productType} - ${money(product.price)}</option>`).join("");
+      const productTypes = [...new Map(artwork.products.map((product) => [product.productType, product])).values()];
+      const firstType = firstProduct.productType;
+      const typeOptions = productTypes.map((product) => `<option value="${escapeHtml(product.productType)}">${escapeHtml(product.productType)}</option>`).join("");
+      const typeProducts = (type) => artwork.products.filter((product) => product.productType === type);
+      const sizeButtons = (products, selectedId) => products.map((product) => { const stock = product.stockQuantity === null ? "" : product.stockQuantity > 0 ? ` · ${product.stockQuantity} available` : " · Sold out"; return `<button type="button" class="variant-button ${product.id === selectedId ? "active" : ""}" data-product-id="${product.id}" ${product.stockQuantity === 0 ? "disabled" : ""}>${escapeHtml(product.sizes || product.title)} · ${money(product.price)}${stock}</button>`; }).join("");
+      const optionSummary = (product) => (product.printfulOptions || []).map((option) => `<span class="product-option">${escapeHtml(option.id.replaceAll("_", " "))}: ${escapeHtml(option.value)}</span>`).join("");
       const content = dialog.querySelector("#printDialogContent");
-      content.innerHTML = `<div class="dialog-heading"><p class="section-label">${artwork.products.length} products available</p><h2 id="printDialogTitle">${artwork.title}</h2><p>${artwork.description || "Made-to-order products fulfilled through Printful."}</p><label class="product-choice-label" for="productChoice">Choose a product</label><select id="productChoice" class="product-choice">${options}</select><p class="dialog-price selected-product-price">${money(firstProduct.price)} before shipping</p></div><form class="checkout-form" data-id="${firstProduct.id}"><input name="name" type="text" placeholder="Full name" required /><input name="email" type="email" placeholder="Email for receipt" required /><input name="address1" type="text" placeholder="Address" required /><input name="address2" type="text" placeholder="Apartment, suite, etc. (optional)" /><div class="form-grid compact-grid"><input name="city" type="text" placeholder="City" required /><select name="state" required>${US_STATE_OPTIONS}</select><input name="postalCode" type="text" placeholder="ZIP code" required /></div><input name="country" type="text" value="US" placeholder="Country" required /><button type="button" class="quote-shipping">Calculate shipping</button><button type="submit" disabled>Continue to Stripe</button></form><p class="notice" id="notice-${firstProduct.id}">Enter your mailing address to see live Printful shipping.</p>`;
+      content.innerHTML = `<div class="dialog-heading"><p class="section-label">${artwork.products.length} options available</p><h2 id="printDialogTitle">${escapeHtml(artwork.title)}</h2><p>${escapeHtml(artwork.description || "Made-to-order products fulfilled through Printful.")}</p><label class="product-choice-label" for="productChoice">Choose a product type</label><select id="productChoice" class="product-choice">${typeOptions}</select><label class="product-choice-label">Choose a size</label><div class="variant-buttons" data-variant-buttons>${sizeButtons(typeProducts(firstType), firstProduct.id)}</div><div class="product-options" data-product-options>${optionSummary(firstProduct)}</div><p class="dialog-price selected-product-price">${money(firstProduct.price)} before shipping</p></div><form class="checkout-form" data-id="${firstProduct.id}"><input name="name" type="text" placeholder="Full name" required /><input name="email" type="email" placeholder="Email for receipt" required /><input name="address1" type="text" placeholder="Address" required /><input name="address2" type="text" placeholder="Apartment, suite, etc. (optional)" /><div class="form-grid compact-grid"><input name="city" type="text" placeholder="City" required /><select name="state" required>${US_STATE_OPTIONS}</select><input name="postalCode" type="text" placeholder="ZIP code" required /></div><input name="country" type="text" value="US" placeholder="Country" required /><button type="button" class="quote-shipping">Calculate shipping</button><button type="submit" disabled>Continue to Stripe</button></form><p class="notice" id="notice-${firstProduct.id}">Enter your mailing address to see live Printful shipping.</p>`;
       const form = content.querySelector(".checkout-form");
       const heading = content.querySelector(".dialog-heading");
       const notice = content.querySelector(".notice");
@@ -215,13 +221,21 @@ function attachArtworkPurchaseHandlers(artworks) {
         }));
       };
       setProductImage(firstProduct);
-      content.querySelector(".product-choice").addEventListener("change", (event) => {
-        const product = artwork.products.find((item) => String(item.id) === event.target.value);
+      const selectProduct = (product) => {
         if (!product) return;
         form.dataset.id = product.id;
         content.querySelector(".selected-product-price").textContent = `${money(product.price)} before shipping`;
+        content.querySelector("[data-product-options]").innerHTML = optionSummary(product);
+        content.querySelectorAll(".variant-button").forEach((item) => item.classList.toggle("active", item.dataset.productId === product.id));
         setProductImage(product);
+      };
+      content.querySelector(".product-choice").addEventListener("change", (event) => {
+        const products = typeProducts(event.target.value);
+        content.querySelector("[data-variant-buttons]").innerHTML = sizeButtons(products, products[0]?.id);
+        content.querySelectorAll(".variant-button").forEach((button) => button.addEventListener("click", () => selectProduct(artwork.products.find((item) => item.id === button.dataset.productId))));
+        selectProduct(products[0]);
       });
+      content.querySelectorAll(".variant-button").forEach((button) => button.addEventListener("click", () => selectProduct(artwork.products.find((item) => item.id === button.dataset.productId))));
       attachPrintCheckoutHandlers(content);
       dialog.showModal();
     });

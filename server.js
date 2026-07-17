@@ -11,17 +11,15 @@ const Stripe = require("stripe");
 const db = require("./src/db");
 const email = require("./src/email");
 const printful = require("./src/printful");
-const { estimateOriginalShipping } = require("./src/shipping");
+const { estimateOriginalShipping, estimateSelfFulfillmentShipping } = require("./src/shipping");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 const BASE_URL = process.env.BASE_URL || `http://localhost:${PORT}`;
-const ADMIN_SECRET = process.env.ADMIN_SECRET || "change-this-admin-secret";
 const stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SECRET_KEY) : null;
 const AUTO_CHARGE_AUCTIONS = String(process.env.AUTO_CHARGE_AUCTIONS || "true") === "true";
 const AUCTION_PROCESS_INTERVAL_MS = Number(process.env.AUCTION_PROCESS_INTERVAL_MS || 60000);
 
-const adminLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 120, standardHeaders: true, legacyHeaders: false });
 const bidderRegistrationLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 20, standardHeaders: true, legacyHeaders: false });
 const bidLimiter = rateLimit({ windowMs: 60 * 1000, max: 20, standardHeaders: true, legacyHeaders: false });
 
@@ -108,18 +106,8 @@ function requireStripe(res) {
   return true;
 }
 
-function requireAdmin(req, res, next) {
-  const supplied = req.headers["x-admin-secret"] || req.body?.adminSecret || req.query?.adminSecret;
-
-  if (!ADMIN_SECRET || ADMIN_SECRET === "change-this-admin-secret") {
-    return res.status(500).json({ error: "ADMIN_SECRET is not configured. Set a private ADMIN_SECRET in your .env file." });
-  }
-
-  if (supplied !== ADMIN_SECRET) {
-    return res.status(401).json({ error: "Unauthorized admin request." });
-  }
-
-  next();
+function requireAdmin(req, res) {
+  return res.status(404).json({ error: "Admin tools are disabled." });
 }
 
 async function processSingleAuctionAutoCharge(art, { force = false, selectedBid = null } = {}) {
@@ -419,7 +407,8 @@ app.post("/api/stripe/webhook", express.raw({ type: "application/json" }), async
 
       if (session.mode === "payment") {
         const payment = db.getPaymentByStripeSessionId(session.id);
-        const shouldProcessPrintful = payment?.kind === "print" && !payment.printful_order_id;
+        const paidPrint = payment?.kind === "print" ? db.getPrintById(payment.print_id) : null;
+        const shouldProcessPrintful = payment?.kind === "print" && paidPrint?.fulfillmentType !== "self" && !payment.printful_order_id;
         if (payment && (payment.status !== "paid" || shouldProcessPrintful)) {
           const wasAlreadyPaid = payment.status === "paid";
           if (!wasAlreadyPaid) db.markPaymentPaid(session.id);
@@ -444,11 +433,28 @@ app.post("/api/stripe/webhook", express.raw({ type: "application/json" }), async
                 heading: "Order received",
                 body: `Thank you for ordering ${print.title}. Your order has been received.`
               });
+              if (print?.fulfillmentType === "self") {
+                const stockReserved = db.decrementPrintStock(print.id);
+                let shippingDetails = {};
+                try { shippingDetails = JSON.parse(payment.shipping_json || "{}").recipient || {}; } catch { shippingDetails = {}; }
+                const shippingAddress = [shippingDetails.address1, shippingDetails.address2, shippingDetails.city, shippingDetails.state_code, shippingDetails.zip].filter(Boolean).join(", ");
+                await email.sendArtistNotificationEmail({
+                  subject: `Self-fulfillment order: ${print.title}`,
+                  body: `<p><strong>Fulfillment:</strong> Self-fulfilled by Rayan</p><p><strong>Product:</strong> ${print.title}</p><p><strong>Customer:</strong> ${payment.customer_name} (${payment.customer_email})</p><p><strong>Amount paid:</strong> $${payment.total_amount}</p><p><strong>Stock reserved:</strong> ${stockReserved ? "Yes" : "No, stock was already depleted. Review this order immediately."}</p><p><strong>Shipping address:</strong> ${shippingAddress || "See Stripe payment details."}</p>`
+                });
+              } else {
+                await email.sendArtistNotificationEmail({
+                  subject: `Printful order: ${print.title}`,
+                  body: `<p><strong>Fulfillment:</strong> Printful</p><p><strong>Product:</strong> ${print.title}</p><p><strong>Customer:</strong> ${payment.customer_name} (${payment.customer_email})</p><p><strong>Amount paid:</strong> $${payment.total_amount}</p>`
+                });
+              }
             }
 
-            const printfulResult = await printful.createDraftOrderFromStripeSession({ payment, print, stripeSession: session });
-            if (printfulResult?.printfulOrderId) db.setPaymentPrintfulOrderId(payment.id, String(printfulResult.printfulOrderId));
-            console.log(`[print order] Printful result: ${printfulResult?.printfulOrderId ? `draft ${printfulResult.printfulOrderId}` : printfulResult?.reason || "no draft id returned"}`);
+            if (print?.fulfillmentType !== "self") {
+              const printfulResult = await printful.createDraftOrderFromStripeSession({ payment, print, stripeSession: session });
+              if (printfulResult?.printfulOrderId) db.setPaymentPrintfulOrderId(payment.id, String(printfulResult.printfulOrderId));
+              console.log(`[print order] Printful result: ${printfulResult?.printfulOrderId ? `draft ${printfulResult.printfulOrderId}` : printfulResult?.reason || "no draft id returned"}`);
+            }
           }
         }
       }
@@ -462,7 +468,7 @@ app.post("/api/stripe/webhook", express.raw({ type: "application/json" }), async
 });
 
 app.use(express.json());
-app.use("/api/admin", adminLimiter);
+app.use("/api/admin", (req, res) => res.status(404).json({ error: "Admin tools are disabled." }));
 app.use("/api/bidders/register", bidderRegistrationLimiter);
 app.use("/api/originals/:id/bids", bidLimiter);
 app.use(express.static(path.join(__dirname, "public")));
@@ -476,25 +482,6 @@ app.get("/api/health", (req, res) => res.json({
 }));
 
 app.get("/api/site-content", (req, res) => res.json({ content: db.getSiteContent() }));
-
-app.get("/api/admin/site-content", requireAdmin, (req, res) => res.json({ content: db.getSiteContent() }));
-
-app.put("/api/admin/site-content", requireAdmin, (req, res) => {
-  const body = req.body || {};
-  const clean = {
-    announcement: String(body.announcement || "").trim(),
-    heroTitle: String(body.heroTitle || "").trim(),
-    heroBlurb: String(body.heroBlurb || "").trim(),
-    bannerImages: Array.isArray(body.bannerImages) ? body.bannerImages.slice(0, 4).map((url) => String(url || "").trim()) : [],
-    aboutLabel: String(body.aboutLabel || "").trim(),
-    aboutTitle: String(body.aboutTitle || "").trim(),
-    aboutBody: String(body.aboutBody || "").trim(),
-    aboutSecondary: String(body.aboutSecondary || "").trim(),
-    aboutImage: String(body.aboutImage || "").trim()
-  };
-  if (!clean.heroTitle || !clean.heroBlurb || !clean.aboutTitle || !clean.aboutBody) return res.status(400).json({ error: "Hero and About text are required." });
-  res.json({ content: db.updateSiteContent(clean) });
-});
 
 app.get("/api/originals", (req, res) => {
   const originals = db.getOriginals().map((art) => ({ ...art, currentBid: db.getCurrentBid(art.id) }));
@@ -652,6 +639,10 @@ async function getPrintShippingQuote(print, body) {
   const recipient = printShippingRecipient(body);
   const validationError = validatePrintShippingRecipient(recipient);
   if (validationError) { const error = new Error(validationError); error.statusCode = 400; throw error; }
+  if (print.fulfillmentType === "self") {
+    const estimate = estimateSelfFulfillmentShipping(print, recipient);
+    return { recipient, rate: { id: "SELF_ESTIMATE", name: "Estimated shipping", currency: "USD" }, shippingAmount: estimate.total, fulfillmentTax: 0, selfEstimate: estimate };
+  }
   const rates = await printful.getShippingRatesForPrint({ print, recipient });
   const rate = rates.find((candidate) => candidate.id === "STANDARD") || rates[0];
   if (!rate || !Number.isFinite(Number(rate.rate))) throw new Error("Printful did not return a shipping rate for this address.");
@@ -666,7 +657,7 @@ app.post("/api/prints/:id/shipping-rate", async (req, res) => {
     const print = db.getPrintById(req.params.id);
     if (!print) return res.status(404).json({ error: "Print product not found." });
     const quote = await getPrintShippingQuote(print, req.body);
-    res.json({ shipping: quote.shippingAmount, fulfillmentTax: quote.fulfillmentTax, product: print.price, total: Math.round((print.price + quote.shippingAmount + quote.fulfillmentTax) * 100) / 100, currency: quote.rate.currency, method: quote.rate.id, name: quote.rate.name, delivery: { min: quote.rate.minDeliveryDays, max: quote.rate.maxDeliveryDays } });
+    res.json({ shipping: quote.shippingAmount, fulfillmentTax: quote.fulfillmentTax, product: print.price, total: Math.round((print.price + quote.shippingAmount + quote.fulfillmentTax) * 100) / 100, currency: quote.rate.currency, method: quote.rate.id, name: quote.rate.name, delivery: { min: quote.rate.minDeliveryDays, max: quote.rate.maxDeliveryDays }, estimate: quote.selfEstimate || null });
   } catch (error) { res.status(error.statusCode || 502).json({ error: error.message || "Could not calculate shipping." }); }
 });
 
@@ -674,6 +665,7 @@ app.post("/api/prints/:id/checkout", async (req, res) => {
   if (!requireStripe(res)) return;
   const print = db.getPrintById(req.params.id);
   if (!print) return res.status(404).json({ error: "Print product not found." });
+  if (print.fulfillmentType === "self" && print.stockQuantity !== null && print.stockQuantity <= 0) return res.status(409).json({ error: "This product is sold out." });
 
   let quote;
   try { quote = await getPrintShippingQuote(print, req.body); }
@@ -686,14 +678,14 @@ app.post("/api/prints/:id/checkout", async (req, res) => {
     line_items: [{ price_data: { currency: "usd", unit_amount: Math.round(print.price * 100), product_data: { name: print.title, description: `${print.productType} · ${print.sizes}` } }, quantity: 1 }],
     shipping_address_collection: { allowed_countries: ["US"] },
     customer_email: customerEmail,
-    metadata: { kind: "print", printId: print.id },
+    metadata: { kind: "print", printId: print.id, fulfillmentType: print.fulfillmentType || "printful" },
     success_url: `${BASE_URL}/success.html?session_id={CHECKOUT_SESSION_ID}`,
     cancel_url: `${BASE_URL}/prints.html`
   };
-  sessionConfig.line_items.push({ price_data: { currency: "usd", unit_amount: shippingCents, product_data: { name: "Shipping", description: rate.name || "Printful shipping" } }, quantity: 1 });
+  sessionConfig.line_items.push({ price_data: { currency: "usd", unit_amount: shippingCents, product_data: { name: "Shipping", description: rate.name || "Shipping" } }, quantity: 1 });
   if (fulfillmentTax > 0) sessionConfig.line_items.push({ price_data: { currency: "usd", unit_amount: Math.round(fulfillmentTax * 100), product_data: { name: "Printful fulfillment tax", description: "Estimated Printful fulfillment tax" } }, quantity: 1 });
   const session = await stripe.checkout.sessions.create(sessionConfig);
-  db.createPayment({ kind: "print", printId: print.id, stripeSessionId: session.id, checkoutUrl: session.url, customerName: recipient.name, customerEmail, subtotalAmount: print.price, shippingAmount, totalAmount: print.price + shippingAmount + fulfillmentTax, amount: print.price + shippingAmount + fulfillmentTax, shippingJson: { method: rate.id, name: rate.name, rate: shippingAmount, fulfillmentTax, currency: rate.currency }, status: "pending" });
+  db.createPayment({ kind: "print", printId: print.id, stripeSessionId: session.id, checkoutUrl: session.url, customerName: recipient.name, customerEmail, subtotalAmount: print.price, shippingAmount, totalAmount: print.price + shippingAmount + fulfillmentTax, amount: print.price + shippingAmount + fulfillmentTax, shippingJson: { recipient, method: rate.id, name: rate.name, rate: shippingAmount, fulfillmentTax, currency: rate.currency, estimate: quote.selfEstimate || null }, status: "pending" });
   res.json({ checkoutUrl: session.url });
 });
 
@@ -931,7 +923,7 @@ app.post("/api/admin/printful/sync-products", requireAdmin, async (req, res) => 
   }
 });
 
-app.get(["/", "/index.html", "/originals.html", "/prints.html", "/success.html", "/cancel.html", "/admin.html", "/register.html", "/register-success.html", "/auction-policy.html", "/privacy.html", "/shipping-policy.html", "/terms.html"], (req, res) => {
+app.get(["/", "/index.html", "/originals.html", "/prints.html", "/success.html", "/cancel.html", "/register.html", "/register-success.html", "/auction-policy.html", "/privacy.html", "/shipping-policy.html", "/terms.html"], (req, res) => {
   const file = req.path === "/" ? "index.html" : req.path.replace("/", "");
   res.sendFile(path.join(__dirname, "public", file));
 });

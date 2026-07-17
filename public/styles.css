@@ -125,6 +125,11 @@
 .view-products { width: 100%; margin-top: 8px; }
 .product-count { color: var(--muted); font-size: 12px; white-space: nowrap; }
 .product-choice-label { display: block; margin: 16px 0 6px; color: var(--muted); font-size: 12px; }
+.variant-buttons { display: flex; flex-wrap: wrap; gap: 8px; }
+.variant-button { background: var(--bg); color: var(--ink); border-color: var(--line); text-transform: none; letter-spacing: 0; }
+.variant-button:hover, .variant-button.active { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+.product-options { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.product-option { border: 1px solid var(--line); padding: 7px 9px; color: var(--muted); font-size: 12px; text-transform: capitalize; }
 .print-dialog { width: min(680px, calc(100vw - 32px)); max-height: calc(100vh - 32px); border: 1px solid var(--ink); padding: 28px; background: var(--bg); color: var(--ink); }
 .print-dialog::backdrop { background: rgba(0, 0, 0, .42); }
 .dialog-close { display: block; margin-left: auto; background: var(--bg); color: var(--ink); padding: 8px 10px; }

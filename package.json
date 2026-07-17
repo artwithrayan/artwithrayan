@@ -5,7 +5,9 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "node --watch server.js"
+    "dev": "node --watch server.js",
+    "sync:printful": "node scripts/sync-printful.js",
+    "export:orders": "node scripts/export-orders.js"
   },
   "dependencies": {
     "better-sqlite3": "latest",

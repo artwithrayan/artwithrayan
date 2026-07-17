@@ -87,6 +87,12 @@ CREATE TABLE IF NOT EXISTS prints (
   printful_product_id TEXT,
   printful_currency TEXT,
   print_file_url TEXT,
+  fulfillment_type TEXT NOT NULL DEFAULT 'printful',
+  stock_quantity INTEGER,
+  width_in REAL,
+  height_in REAL,
+  depth_in REAL,
+  weight_lb REAL,
   source TEXT NOT NULL DEFAULT 'manual',
   status TEXT NOT NULL DEFAULT 'active',
   is_active INTEGER NOT NULL DEFAULT 1,
@@ -204,6 +210,12 @@ ensureColumn("prints", "image_urls", "TEXT NOT NULL DEFAULT '[]'");
 db.prepare(`UPDATE prints SET description='Made-to-order archival-style print fulfilled through Printful.' WHERE description LIKE '%after setup%'`).run();
 ensureColumn("prints", "printful_currency", "TEXT");
 ensureColumn("prints", "print_file_url", "TEXT");
+ensureColumn("prints", "fulfillment_type", "TEXT NOT NULL DEFAULT 'printful'");
+ensureColumn("prints", "stock_quantity", "INTEGER");
+ensureColumn("prints", "width_in", "REAL");
+ensureColumn("prints", "height_in", "REAL");
+ensureColumn("prints", "depth_in", "REAL");
+ensureColumn("prints", "weight_lb", "REAL");
 ensureColumn("prints", "source", "TEXT NOT NULL DEFAULT 'manual'");
 ensureColumn("prints", "printful_synced_at", "TEXT");
 ensureColumn("prints", "updated_at", "TEXT");
@@ -403,6 +415,12 @@ function mapPrint(row) {
     printfulSyncVariantId: row.printful_sync_variant_id,
     printfulProductId: row.printful_product_id,
     printfulOptions: (() => { try { return JSON.parse(row.printful_options || "[]"); } catch { return []; } })(),
+    fulfillmentType: row.fulfillment_type || "printful",
+    stockQuantity: row.stock_quantity === null || row.stock_quantity === undefined ? null : Number(row.stock_quantity),
+    widthIn: row.width_in,
+    heightIn: row.height_in,
+    depthIn: row.depth_in,
+    weightLb: row.weight_lb,
     artworkKey: row.artwork_key || "",
     printfulCurrency: row.printful_currency,
     printFileUrl: row.print_file_url,
@@ -633,6 +651,15 @@ function getPrintById(id) {
   return row ? mapPrint(row) : null;
 }
 
+function decrementPrintStock(id) {
+  const result = db.prepare(`
+    UPDATE prints
+    SET stock_quantity = stock_quantity - 1, updated_at=CURRENT_TIMESTAMP
+    WHERE id=? AND is_active=1 AND stock_quantity IS NOT NULL AND stock_quantity > 0
+  `).run(id);
+  return result.changes === 1;
+}
+
 function upsertPrintfulPrint(item) {
   const existing = item.printfulSyncVariantId
     ? db.prepare(`SELECT * FROM prints WHERE printful_sync_variant_id = ?`).get(String(item.printfulSyncVariantId))
@@ -706,6 +733,15 @@ function upsertPrintfulPrint(item) {
 function upsertPrintfulPrints(items) {
   const upsertMany = db.transaction((rows) => rows.map((row) => upsertPrintfulPrint(row)));
   return upsertMany(items);
+}
+
+function archiveMissingPrintfulPrints(activeSyncVariantIds) {
+  const ids = [...new Set(activeSyncVariantIds.map((id) => String(id)).filter(Boolean))];
+  if (!ids.length) {
+    return db.prepare(`UPDATE prints SET is_active=0, status='archived', updated_at=CURRENT_TIMESTAMP WHERE source='printful' AND is_active=1`).run().changes;
+  }
+  const placeholders = ids.map(() => "?").join(",");
+  return db.prepare(`UPDATE prints SET is_active=0, status='archived', updated_at=CURRENT_TIMESTAMP WHERE source='printful' AND is_active=1 AND printful_sync_variant_id NOT IN (${placeholders})`).run(...ids).changes;
 }
 
 function setPrintArtworkKey(id, artworkKey) {
@@ -990,8 +1026,10 @@ module.exports = {
   getPrints,
   getAllPrintsForAdmin,
   getPrintById,
+  decrementPrintStock,
   upsertPrintfulPrint,
   upsertPrintfulPrints,
+  archiveMissingPrintfulPrints,
   setPrintArtworkKey,
   createOrUpdateBidder,
   getBidderById,
