@@ -161,7 +161,7 @@ const defaultSiteContent = {
   announcement: "ORIGINAL ARTWORK · PRINTS MADE TO ORDER · ART BY RAYAN RAO",
   heroTitle: "RAYAN RAO",
   heroBlurb: "Original paintings and made-to-order prints by Rayan Rao.",
-  bannerImages: ["/images/banner-artwork.jpg", "", "", ""],
+  bannerImages: [],
   aboutLabel: "About",
   aboutTitle: "About the artist",
   aboutBody: "Rayan Rao is an artist whose work combines portraiture, expressive realism, and visual storytelling. His paintings explore identity, memory, imagination, and emotion through detailed compositions and bold, personal imagery.",
@@ -177,11 +177,10 @@ function getSiteContent() {
   }
   try {
     const content = { ...defaultSiteContent, ...JSON.parse(row.setting_value) };
-    const hasBannerImage = Array.isArray(content.bannerImages) && content.bannerImages.some(Boolean);
-    if (!hasBannerImage || !content.aboutImage) {
+    if (content.bannerImages?.length || !content.aboutImage) {
       const updated = {
         ...content,
-        bannerImages: hasBannerImage ? content.bannerImages : defaultSiteContent.bannerImages,
+        bannerImages: defaultSiteContent.bannerImages,
         aboutImage: content.aboutImage || defaultSiteContent.aboutImage
       };
       db.prepare(`UPDATE site_settings SET setting_value=?, updated_at=CURRENT_TIMESTAMP WHERE setting_key='homepage'`).run(JSON.stringify(updated));

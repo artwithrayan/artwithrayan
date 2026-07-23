@@ -162,5 +162,7 @@ select:focus { outline: 1px solid var(--ink); }
 .banner-image.has-image span { display: none; }
 @media (max-width: 680px) { .banner-image { aspect-ratio: 16 / 9; min-height: 0; } }
 
+.portrait-placeholder img { object-fit: contain; }
+
 /* Discourage casual saving and dragging of displayed artwork. */
 .art-image img, .product-preview img, .portrait-placeholder img, .banner-image { user-select: none; -webkit-user-drag: none; }
