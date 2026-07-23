@@ -166,3 +166,4 @@ select:focus { outline: 1px solid var(--ink); }
 
 /* Discourage casual saving and dragging of displayed artwork. */
 .art-image img, .product-preview img, .portrait-placeholder img, .banner-image { user-select: none; -webkit-user-drag: none; }
+.about-copy p { font-size: 18px; line-height: 1.65; white-space: pre-line; }

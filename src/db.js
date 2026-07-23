@@ -164,7 +164,7 @@ const defaultSiteContent = {
   bannerImages: [],
   aboutLabel: "About",
   aboutTitle: "About the artist",
-  aboutBody: "Rayan Rao is an artist whose work combines portraiture, expressive realism, and visual storytelling. His paintings explore identity, memory, imagination, and emotion through detailed compositions and bold, personal imagery.",
+  aboutBody: "I'm Rayan Rao, an artist and biomedical engineering student based in North Carolina. For me, painting is a way of placing a piece of myself onto the canvas. Every work reflects something I have felt, noticed, remembered, or imagined, even when that meaning is not immediately visible to anyone else.\n\nWhat began as a personal creative outlet has grown into an opportunity to share those pieces of myself with others. I hope that when someone connects with my work, they find something within it that feels personal to them as well.\n\nEvery original artwork is created by me, and each print is produced from a piece I have chosen to share beyond the original canvas. Thank you for supporting my work and giving it a place in your life.",
   aboutSecondary: "Original paintings and prints are available at fixed prices. Prints and products are made to order through fulfillment partners.",
   aboutImage: "/images/aboutme.jpg"
 };
@@ -177,11 +177,16 @@ function getSiteContent() {
   }
   try {
     const content = { ...defaultSiteContent, ...JSON.parse(row.setting_value) };
-    if (content.bannerImages?.length || !content.aboutImage) {
+    const oldAboutBodies = [
+      "Rayan Rao is an artist whose work combines portraiture, expressive realism, and visual storytelling. His paintings explore identity, memory, imagination, and emotion through detailed compositions and bold, personal imagery.",
+      "Rayan Rao is an upcoming artist based in Raleigh, NC. He is currently a senior at NC State University studying Biomedical Engineering. As an engineer and an artist, Rayan loves to create."
+    ];
+    if (content.bannerImages?.length || !content.aboutImage || oldAboutBodies.includes(content.aboutBody)) {
       const updated = {
         ...content,
         bannerImages: defaultSiteContent.bannerImages,
-        aboutImage: content.aboutImage || defaultSiteContent.aboutImage
+        aboutImage: content.aboutImage || defaultSiteContent.aboutImage,
+        aboutBody: oldAboutBodies.includes(content.aboutBody) ? defaultSiteContent.aboutBody : content.aboutBody
       };
       db.prepare(`UPDATE site_settings SET setting_value=?, updated_at=CURRENT_TIMESTAMP WHERE setting_key='homepage'`).run(JSON.stringify(updated));
       return updated;
