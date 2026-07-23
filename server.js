@@ -477,6 +477,52 @@ app.post("/api/stripe/webhook", express.raw({ type: "application/json" }), async
   }
 });
 
+app.post("/api/printful/webhook", express.json(), async (req, res) => {
+  const webhookSecret = String(process.env.PRINTFUL_WEBHOOK_SECRET || "").trim();
+  if (!webhookSecret || req.query.token !== webhookSecret) return res.status(401).json({ error: "Invalid webhook token." });
+
+  const event = req.body || {};
+  if (event.type !== "package_shipped" && event.type !== "shipment_sent") return res.json({ received: true, handled: false });
+
+  const shipment = event.data?.shipment || {};
+  const order = event.data?.order || {};
+  const printfulOrderId = order.id || order.external_id;
+  if (!printfulOrderId) return res.json({ received: true, handled: false });
+
+  const payment = db.getPaymentByPrintfulOrderId(printfulOrderId);
+  if (!payment) {
+    console.warn(`[printful webhook] no payment found for order ${printfulOrderId}`);
+    return res.json({ received: true, handled: false });
+  }
+
+  const print = payment.print_id ? db.getPrintById(payment.print_id) : null;
+  const trackingNumber = String(shipment.tracking_number || "");
+  const trackingUrl = String(shipment.tracking_url || "");
+  db.setPaymentTracking(payment.id, {
+    number: trackingNumber,
+    url: trackingUrl,
+    carrier: String(shipment.carrier || ""),
+    service: String(shipment.service || shipment.shipping_service_name || "")
+  });
+
+  if (!payment.tracking_email_sent_at) {
+    const result = await email.sendShipmentTrackingEmail({
+      to: payment.customer_email,
+      customerName: payment.customer_name,
+      productName: print?.title || "your Rayan Rao Art order",
+      carrier: shipment.carrier,
+      service: shipment.service || shipment.shipping_service_name,
+      trackingNumber,
+      trackingUrl
+    });
+    if (!result.sent) return res.status(500).json({ error: result.reason || "Tracking email could not be sent." });
+    db.markPaymentTrackingEmailSent(payment.id);
+  }
+
+  console.log(`[printful webhook] tracking recorded for order ${printfulOrderId}`);
+  return res.json({ received: true, handled: true });
+});
+
 app.use(express.json());
 app.use("/api/admin", (req, res) => res.status(404).json({ error: "Admin tools are disabled." }));
 app.use("/api/bidders", (req, res) => res.status(404).json({ error: "Bidding is no longer available." }));
@@ -1004,7 +1050,23 @@ async function syncPrintfulOnStartup() {
   }
 }
 
+async function configurePrintfulWebhookOnStartup() {
+  if (String(process.env.PRINTFUL_WEBHOOK_ON_STARTUP || "false").toLowerCase() !== "true") return;
+  const webhookUrl = String(process.env.PRINTFUL_WEBHOOK_URL || "").trim();
+  if (!webhookUrl) {
+    console.error("[printful webhook setup] PRINTFUL_WEBHOOK_URL is not configured.");
+    return;
+  }
+  try {
+    const result = await printful.configureWebhooks({ url: webhookUrl, types: ["package_shipped"] });
+    console.log(`[printful webhook setup] configured ${result?.result?.url || webhookUrl}`);
+  } catch (error) {
+    console.error("[printful webhook setup] failed:", error.message || error);
+  }
+}
+
 app.listen(PORT, async () => {
   console.log(`Rayan Rao Art site running at http://localhost:${PORT}`);
   await syncPrintfulOnStartup();
+  await configurePrintfulWebhookOnStartup();
 });

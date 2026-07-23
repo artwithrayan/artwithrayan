@@ -167,3 +167,14 @@ select:focus { outline: 1px solid var(--ink); }
 /* Discourage casual saving and dragging of displayed artwork. */
 .art-image img, .product-preview img, .portrait-placeholder img, .banner-image { user-select: none; -webkit-user-drag: none; }
 .about-copy p { font-size: 18px; line-height: 1.65; white-space: pre-line; }
+
+/* Make the About section full-bleed with a taller, unframed artist image. */
+.about-section { grid-template-columns: minmax(320px, 44vw) minmax(0, 1fr); gap: clamp(28px, 5vw, 72px); padding: 56px 0; width: 100%; align-items: stretch; }
+.portrait-placeholder { aspect-ratio: 3 / 4; max-width: none; border: 0; background: transparent; }
+.portrait-placeholder img { object-fit: cover; }
+.about-copy { padding: 0 28px 0 0; }
+@media (max-width: 680px) {
+  .about-section { grid-template-columns: 1fr; padding: 32px 0; gap: 24px; }
+  .portrait-placeholder { aspect-ratio: 4 / 5; }
+  .about-copy { padding: 0 16px; }
+}

@@ -48,6 +48,11 @@ RESEND_API_KEY=re_your_key_here
 FROM_EMAIL=Rayan Rao Art <onboarding@resend.dev>
 ARTIST_EMAIL=raorayan4@gmail.com
 
+PRINTFUL_API_KEY=your_printful_api_key
+PRINTFUL_WEBHOOK_SECRET=use_a_long_random_secret
+PRINTFUL_WEBHOOK_URL=https://your-render-site.onrender.com/api/printful/webhook?token=use_a_long_random_secret
+PRINTFUL_WEBHOOK_ON_STARTUP=false
+
 AUTO_CHARGE_AUCTIONS=true
 AUCTION_PROCESS_INTERVAL_MS=60000
 ```
@@ -61,6 +66,12 @@ stripe listen --forward-to localhost:3000/api/stripe/webhook
 ```
 
 Paste the `whsec_...` value into `.env` as `STRIPE_WEBHOOK_SECRET`, restart `npm run dev`, and keep the Stripe CLI terminal running.
+
+## Printful shipment tracking emails
+
+When Printful sends a `package_shipped` event, the server records the carrier, service, tracking number, and tracking URL for the matching paid order, then sends the customer a tracking email through Resend. The shipment webhook is authenticated with the token in `PRINTFUL_WEBHOOK_SECRET`.
+
+For a Render deployment, add the Printful variables above. Set `PRINTFUL_WEBHOOK_ON_STARTUP=true` for one deploy so the server registers the webhook with Printful, confirm the Render logs show `[printful webhook setup] configured`, then change it back to `false` and redeploy. Keep `PRINTFUL_WEBHOOK_URL` and `PRINTFUL_WEBHOOK_SECRET` unchanged after setup.
 
 ## How automatic charging works
 

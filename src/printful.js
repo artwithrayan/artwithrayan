@@ -217,6 +217,13 @@ async function fetchPrintfulProductsForWebsite() {
   return { importedProducts, skipped, printfulProductCount: productSummaries.length };
 }
 
+async function configureWebhooks({ url, types = ["package_shipped"] }) {
+  return printfulFetch("/webhooks", {
+    method: "POST",
+    body: JSON.stringify({ url, types })
+  });
+}
+
 async function createDraftOrderFromStripeSession({ payment, print, stripeSession }) {
   const autoCreate = String(process.env.PRINTFUL_AUTO_CREATE_DRAFT_ORDER || "false").toLowerCase() === "true";
   if (!autoCreate) { console.log("[printful skipped] PRINTFUL_AUTO_CREATE_DRAFT_ORDER is false."); return { skipped: true, reason: "Auto creation disabled." }; }
@@ -257,4 +264,4 @@ async function createDraftOrderFromStripeSession({ payment, print, stripeSession
   return { skipped: true, reason: "Missing Printful sync variant data." };
 }
 
-module.exports = { printfulFetch, getStoreProducts, getStoreProductDetails, fetchPrintfulProductsForWebsite, getShippingRatesForPrint, estimatePrintCosts, createDraftOrderFromStripeSession };
+module.exports = { printfulFetch, getStoreProducts, getStoreProductDetails, fetchPrintfulProductsForWebsite, configureWebhooks, getShippingRatesForPrint, estimatePrintCosts, createDraftOrderFromStripeSession };

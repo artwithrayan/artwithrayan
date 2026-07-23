@@ -146,6 +146,26 @@ async function sendBuyerReceiptEmail({ to, subject, heading, body }) {
   });
 }
 
+async function sendShipmentTrackingEmail({ to, customerName, productName, carrier, service, trackingNumber, trackingUrl }) {
+  const trackingLink = trackingUrl ? `<p><a href="${trackingUrl}" style="display:inline-block;background:#111;color:#fff;padding:12px 18px;text-decoration:none;">Track shipment</a></p><p>${trackingUrl}</p>` : "";
+  return sendEmail({
+    to,
+    subject: `Your ${productName} has shipped`,
+    html: `
+      <div style="font-family:Arial,sans-serif;line-height:1.5;color:#111;">
+        <h1 style="font-weight:500;">Your order has shipped</h1>
+        <p>Hi ${customerName || "there"},</p>
+        <p>Your order for <strong>${productName}</strong> has shipped.</p>
+        <p><strong>Carrier:</strong> ${carrier || "Printful carrier"}</p>
+        <p><strong>Service:</strong> ${service || "Standard shipping"}</p>
+        <p><strong>Tracking number:</strong> ${trackingNumber || "Available through the tracking link"}</p>
+        ${trackingLink}
+        <p>Thank you,<br>Rayan Rao Art</p>
+      </div>
+    `
+  });
+}
+
 async function sendArtistNotificationEmail({ subject, body }) {
   if (!ARTIST_EMAIL) {
     console.log("[artist email skipped] ARTIST_EMAIL is not configured.", { subject });
@@ -172,5 +192,6 @@ module.exports = {
   sendAuctionAutoChargeReceiptEmail,
   sendAuctionAutoChargeFailedEmail,
   sendBuyerReceiptEmail,
+  sendShipmentTrackingEmail,
   sendArtistNotificationEmail
 };
