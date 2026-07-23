@@ -11,6 +11,7 @@ const Stripe = require("stripe");
 const db = require("./src/db");
 const email = require("./src/email");
 const printful = require("./src/printful");
+const sheets = require("./src/google-sheets");
 const { estimateOriginalShipping, estimateSelfFulfillmentShipping } = require("./src/shipping");
 
 const app = express();
@@ -453,6 +454,16 @@ app.post("/api/stripe/webhook", express.raw({ type: "application/json" }), async
               const printfulResult = await printful.createDraftOrderFromStripeSession({ payment, print, stripeSession: session });
               if (printfulResult?.printfulOrderId) db.setPaymentPrintfulOrderId(payment.id, String(printfulResult.printfulOrderId));
               console.log(`[print order] Printful result: ${printfulResult?.printfulOrderId ? `draft ${printfulResult.printfulOrderId}` : printfulResult?.reason || "no draft id returned"}`);
+            }
+          }
+
+          if (sheets.isConfigured()) {
+            const latestPayment = db.getPaymentByStripeSessionId(session.id);
+            const latestPrint = latestPayment?.kind === "print" ? db.getPrintById(latestPayment.print_id) : null;
+            const latestOriginal = latestPayment?.kind === "original" ? db.getOriginalById(latestPayment.original_id) : null;
+            if (await sheets.appendPaidOrder({ payment: latestPayment, print: latestPrint, original: latestOriginal })) {
+              db.markPaymentGoogleSheetsSynced(latestPayment.id);
+              console.log(`[google sheets] recorded order ${latestPayment.id}`);
             }
           }
         }

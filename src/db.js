@@ -245,6 +245,7 @@ ensureColumn("payments", "shipping_amount", "INTEGER NOT NULL DEFAULT 0");
 ensureColumn("payments", "total_amount", "INTEGER");
 ensureColumn("payments", "shipping_json", "TEXT");
 ensureColumn("payments", "failure_reason", "TEXT");
+ensureColumn("payments", "google_sheets_synced_at", "TEXT");
 
 function slugify(value) {
   return String(value || "")
@@ -1036,6 +1037,14 @@ function setPaymentPrintfulOrderId(paymentId, printfulOrderId) {
   `).run(printfulOrderId, paymentId);
 }
 
+function markPaymentGoogleSheetsSynced(paymentId) {
+  db.prepare(`
+    UPDATE payments
+    SET google_sheets_synced_at=CURRENT_TIMESTAMP
+    WHERE id=?
+  `).run(paymentId);
+}
+
 function getLatestPaymentForOriginal(originalId) {
   return db.prepare(`
     SELECT * FROM payments
@@ -1096,6 +1105,7 @@ module.exports = {
   getPaymentByStripeSessionId,
   markPaymentPaid,
   setPaymentPrintfulOrderId,
+  markPaymentGoogleSheetsSynced,
   getLatestPaymentForOriginal,
   getSiteContent,
   updateSiteContent,
