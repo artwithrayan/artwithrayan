@@ -161,12 +161,12 @@ const defaultSiteContent = {
   announcement: "ORIGINAL ARTWORK · PRINTS MADE TO ORDER · ART BY RAYAN RAO",
   heroTitle: "RAYAN RAO",
   heroBlurb: "Original paintings and made-to-order prints by Rayan Rao.",
-  bannerImages: ["", "", "", ""],
+  bannerImages: ["/images/banner-artwork.jpg", "", "", ""],
   aboutLabel: "About",
   aboutTitle: "About the artist",
   aboutBody: "Rayan Rao is an artist whose work combines portraiture, expressive realism, and visual storytelling. His paintings explore identity, memory, imagination, and emotion through detailed compositions and bold, personal imagery.",
   aboutSecondary: "Original paintings and prints are available at fixed prices. Prints and products are made to order through fulfillment partners.",
-  aboutImage: ""
+  aboutImage: "/images/aboutme.jpg"
 };
 
 function getSiteContent() {
@@ -175,7 +175,20 @@ function getSiteContent() {
     db.prepare(`INSERT INTO site_settings (setting_key, setting_value) VALUES ('homepage', ?)`).run(JSON.stringify(defaultSiteContent));
     return { ...defaultSiteContent };
   }
-  try { return { ...defaultSiteContent, ...JSON.parse(row.setting_value) }; } catch { return { ...defaultSiteContent }; }
+  try {
+    const content = { ...defaultSiteContent, ...JSON.parse(row.setting_value) };
+    const hasBannerImage = Array.isArray(content.bannerImages) && content.bannerImages.some(Boolean);
+    if (!hasBannerImage || !content.aboutImage) {
+      const updated = {
+        ...content,
+        bannerImages: hasBannerImage ? content.bannerImages : defaultSiteContent.bannerImages,
+        aboutImage: content.aboutImage || defaultSiteContent.aboutImage
+      };
+      db.prepare(`UPDATE site_settings SET setting_value=?, updated_at=CURRENT_TIMESTAMP WHERE setting_key='homepage'`).run(JSON.stringify(updated));
+      return updated;
+    }
+    return content;
+  } catch { return { ...defaultSiteContent }; }
 }
 
 function updateSiteContent(content) {
