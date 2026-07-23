@@ -4,19 +4,20 @@ const SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets";
 const TOKEN_URL = "https://oauth2.googleapis.com/token";
 const API_BASE = "https://sheets.googleapis.com/v4/spreadsheets";
 const DEFAULT_HEADERS = [
-  "Order ID", "Date", "Status", "Product", "Fulfillment", "Customer", "Email",
-  "Product Amount", "Shipping Charged", "Total Charged", "Stripe Fee Estimate",
-  "Estimated Net Before Fulfillment", "Printful Draft ID", "Address", "City", "State", "ZIP", "Country"
+  "Order ID", "Date", "Status", "Product", "Product Type", "Size", "Printful Product ID", "Printful Variant ID", "Printful Sync Variant ID", "Product Options",
+  "Fulfillment", "Customer", "Email", "Product Amount", "Shipping Charged", "Fulfillment Tax Charged", "Total Charged", "Stripe Fee Estimate",
+  "Printful Subtotal", "Printful Shipping", "Printful Tax/VAT", "Printful Total", "Estimated Profit", "Printful Draft ID", "Address", "City", "State", "ZIP", "Country"
 ];
 
 let tokenCache = { value: "", expiresAt: 0 };
 
 function getConfig() {
+  const configuredRange = String(process.env.GOOGLE_SHEETS_RANGE || "").trim();
   return {
     spreadsheetId: String(process.env.GOOGLE_SHEETS_SPREADSHEET_ID || "").trim(),
     email: String(process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL || "").trim(),
     privateKey: String(process.env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY || "").replace(/\\n/g, "\n"),
-    range: String(process.env.GOOGLE_SHEETS_RANGE || "Sheet1!A:R").trim()
+    range: configuredRange === "Sheet1!A:R" ? "Sheet1!A:AC" : configuredRange || "Sheet1!A:AC"
   };
 }
 
@@ -64,8 +65,10 @@ async function sheetsRequest(path, options = {}) {
 async function ensureHeaders() {
   const config = getConfig();
   const firstCell = config.range.replace(/![^!]+$/, "!A1");
-  const existing = await sheetsRequest(`/values/${encodeURIComponent(firstCell)}`);
-  if (existing.values?.[0]?.[0]) return;
+  const headerRange = firstCell.replace(/A1$/, "A1:AC1");
+  const existing = await sheetsRequest(`/values/${encodeURIComponent(headerRange)}`);
+  const existingHeaders = existing.values?.[0] || [];
+  if (existingHeaders[0] && existingHeaders.length === DEFAULT_HEADERS.length) return;
   await sheetsRequest(`/values/${encodeURIComponent(firstCell)}?valueInputOption=USER_ENTERED`, {
     method: "PUT",
     body: JSON.stringify({ range: firstCell, majorDimension: "ROWS", values: [DEFAULT_HEADERS] })
@@ -86,26 +89,56 @@ function shippingFields(payment) {
   }
 }
 
+function fulfillmentCosts(payment) {
+  try {
+    const parsed = JSON.parse(payment.shipping_json || "{}");
+    return parsed.fulfillmentCosts || null;
+  } catch {
+    return null;
+  }
+}
+
+function printOptions(print) {
+  if (!Array.isArray(print?.printfulOptions)) return "";
+  return print.printfulOptions.map((option) => `${option.id || ""}=${option.value || ""}`).filter(Boolean).join("; ");
+}
+
 async function appendPaidOrder({ payment, print, original }) {
   if (!isConfigured() || payment.google_sheets_synced_at) return false;
   const config = getConfig();
   await ensureHeaders();
   const total = Number(payment.total_amount || payment.amount || 0);
   const stripeFeeEstimate = total > 0 ? total * 0.029 + 0.30 : 0;
+  const costs = fulfillmentCosts(payment);
+  const printfulTotal = costs ? Number(costs.total || 0) : 0;
+  const estimatedProfit = total - stripeFeeEstimate - printfulTotal;
   const [address, city, state, zip, country] = shippingFields(payment);
+  let fulfillmentTaxCharged = 0;
+  try { fulfillmentTaxCharged = Number(JSON.parse(payment.shipping_json || "{}").fulfillmentTax || 0); } catch { fulfillmentTaxCharged = 0; }
   const row = [
     payment.id,
     payment.paid_at || payment.created_at || new Date().toISOString(),
     payment.status,
     print?.title || original?.title || payment.print_id || payment.original_id || "",
+    print?.productType || original?.medium || "Original artwork",
+    print?.sizes || original?.size || "",
+    print?.printfulProductId || "",
+    print?.printfulVariantId || "",
+    print?.printfulSyncVariantId || "",
+    printOptions(print),
     print?.fulfillmentType === "self" ? "Self-fulfilled" : payment.kind === "print" ? "Printful" : "Self-fulfilled",
     payment.customer_name || "",
     payment.customer_email || "",
     money(payment.subtotal_amount),
     money(payment.shipping_amount),
+    money(fulfillmentTaxCharged),
     money(total),
     money(stripeFeeEstimate),
-    money(total - stripeFeeEstimate),
+    costs ? money(costs.subtotal) : "",
+    costs ? money(costs.shipping) : "",
+    costs ? money(Number(costs.tax || 0) + Number(costs.vat || 0)) : "",
+    costs ? money(printfulTotal) : "",
+    costs || payment.kind === "original" || print?.fulfillmentType === "self" ? money(estimatedProfit) : "",
     payment.printful_order_id || "",
     address, city, state, zip, country
   ];

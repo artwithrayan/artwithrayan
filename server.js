@@ -688,7 +688,7 @@ async function getPrintShippingQuote(print, body) {
   if (validationError) { const error = new Error(validationError); error.statusCode = 400; throw error; }
   if (print.fulfillmentType === "self") {
     const estimate = estimateSelfFulfillmentShipping(print, recipient);
-    return { recipient, rate: { id: "SELF_ESTIMATE", name: "Estimated shipping", currency: "USD" }, shippingAmount: estimate.total, fulfillmentTax: 0, selfEstimate: estimate };
+    return { recipient, rate: { id: "SELF_ESTIMATE", name: "Estimated shipping", currency: "USD" }, shippingAmount: estimate.total, fulfillmentTax: 0, fulfillmentCosts: null, selfEstimate: estimate };
   }
   const rates = await printful.getShippingRatesForPrint({ print, recipient });
   const rate = rates.find((candidate) => candidate.id === "STANDARD") || rates[0];
@@ -696,7 +696,24 @@ async function getPrintShippingQuote(print, body) {
   const estimate = await printful.estimatePrintCosts({ print, recipient, shippingMethod: rate.id });
   const costs = estimate?.costs || {};
   const fulfillmentTax = Math.round((Number(costs.tax || 0) + Number(costs.vat || 0)) * 100) / 100;
-  return { recipient, rate, shippingAmount: Math.round(Number(rate.rate) * 100) / 100, fulfillmentTax };
+  return {
+    recipient,
+    rate,
+    shippingAmount: Math.round(Number(rate.rate) * 100) / 100,
+    fulfillmentTax,
+    fulfillmentCosts: {
+      currency: costs.currency || rate.currency || "USD",
+      subtotal: Number(costs.subtotal || 0),
+      discount: Number(costs.discount || 0),
+      shipping: Number(costs.shipping || 0),
+      digitization: Number(costs.digitization || 0),
+      additionalFee: Number(costs.additional_fee || 0),
+      fulfillmentFee: Number(costs.fulfillment_fee || 0),
+      tax: Number(costs.tax || 0),
+      vat: Number(costs.vat || 0),
+      total: Number(costs.total || 0)
+    }
+  };
 }
 
 app.post("/api/prints/:id/shipping-rate", async (req, res) => {
@@ -732,7 +749,7 @@ app.post("/api/prints/:id/checkout", async (req, res) => {
   sessionConfig.line_items.push({ price_data: { currency: "usd", unit_amount: shippingCents, product_data: { name: "Shipping", description: rate.name || "Shipping" } }, quantity: 1 });
   if (fulfillmentTax > 0) sessionConfig.line_items.push({ price_data: { currency: "usd", unit_amount: Math.round(fulfillmentTax * 100), product_data: { name: "Printful fulfillment tax", description: "Estimated Printful fulfillment tax" } }, quantity: 1 });
   const session = await stripe.checkout.sessions.create(sessionConfig);
-  db.createPayment({ kind: "print", printId: print.id, stripeSessionId: session.id, checkoutUrl: session.url, customerName: recipient.name, customerEmail, subtotalAmount: print.price, shippingAmount, totalAmount: print.price + shippingAmount + fulfillmentTax, amount: print.price + shippingAmount + fulfillmentTax, shippingJson: { recipient, method: rate.id, name: rate.name, rate: shippingAmount, fulfillmentTax, currency: rate.currency, estimate: quote.selfEstimate || null }, status: "pending" });
+  db.createPayment({ kind: "print", printId: print.id, stripeSessionId: session.id, checkoutUrl: session.url, customerName: recipient.name, customerEmail, subtotalAmount: print.price, shippingAmount, totalAmount: print.price + shippingAmount + fulfillmentTax, amount: print.price + shippingAmount + fulfillmentTax, shippingJson: { recipient, method: rate.id, name: rate.name, rate: shippingAmount, fulfillmentTax, fulfillmentCosts: quote.fulfillmentCosts || null, currency: rate.currency, estimate: quote.selfEstimate || null }, status: "pending" });
   res.json({ checkoutUrl: session.url });
 });
 
