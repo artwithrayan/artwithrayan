@@ -122,6 +122,11 @@
 .product-card > .notice { display: none; }
 .product-card .product-info > p { display: none; }
 .purchase-print { width: 100%; margin-top: 8px; }
+.purchase-original { width: 100%; margin-top: 8px; }
+.shine-button { width: 100%; margin-top: 8px; background: var(--bg); color: var(--ink); border-color: var(--ink); }
+.shine-button:hover, .shine-button[aria-pressed="true"] { background: var(--ink); color: var(--bg); }
+.original-art-image { background: transparent; border: 0; }
+.original-art-image img { object-fit: contain; background: transparent; }
 .view-products { width: 100%; margin-top: 8px; }
 .product-count { color: var(--muted); font-size: 12px; white-space: nowrap; }
 .product-choice-label { display: block; margin: 16px 0 6px; color: var(--muted); font-size: 12px; }

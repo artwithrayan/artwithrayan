@@ -17,11 +17,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const BASE_URL = process.env.BASE_URL || `http://localhost:${PORT}`;
 const stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SECRET_KEY) : null;
-const AUTO_CHARGE_AUCTIONS = String(process.env.AUTO_CHARGE_AUCTIONS || "true") === "true";
-const AUCTION_PROCESS_INTERVAL_MS = Number(process.env.AUCTION_PROCESS_INTERVAL_MS || 60000);
-
-const bidderRegistrationLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 20, standardHeaders: true, legacyHeaders: false });
-const bidLimiter = rateLimit({ windowMs: 60 * 1000, max: 20, standardHeaders: true, legacyHeaders: false });
+const AUTO_CHARGE_AUCTIONS = false;
 
 function slugifyId(value) {
   return String(value || "")
@@ -46,10 +42,12 @@ function validateOriginalPayload(body, { allowMissingId = false } = {}) {
   const size = String(body.size || "").trim();
   const year = String(body.year || new Date().getFullYear()).trim();
   const description = String(body.description || "").trim();
-  const startingBid = cleanNumber(body.startingBid);
+  const price = cleanNumber(body.price ?? body.startingBid);
+  const startingBid = price;
   const bidIncrement = cleanNumber(body.bidIncrement, 10);
-  const endsAt = String(body.endsAt || "").trim();
+  const endsAt = String(body.endsAt || "2099-12-31T23:59:59.000Z").trim();
   const imageUrl = String(body.imageUrl || "").trim();
+  const revealImageUrl = String(body.revealImageUrl || "").trim();
   const colorOne = String(body.colorOne || "#f4f4f4").trim();
   const colorTwo = String(body.colorTwo || "#d8d8d8").trim();
   const widthIn = cleanNumber(body.widthIn);
@@ -63,10 +61,9 @@ function validateOriginalPayload(body, { allowMissingId = false } = {}) {
   if (medium.length < 2) throw new Error("Medium is required.");
   if (size.length < 2) throw new Error("Size is required, for example 18 × 24 in.");
   if (description.length < 5) throw new Error("Description is required.");
-  if (!Number.isFinite(startingBid) || startingBid < 1) throw new Error("Starting bid must be at least $1.");
-  if (!Number.isFinite(bidIncrement) || bidIncrement < 1) throw new Error("Bid increment must be at least $1.");
-  if (Number.isNaN(new Date(endsAt).getTime())) throw new Error("Auction end date/time is required.");
+  if (!Number.isFinite(price) || price < 1) throw new Error("Price must be at least $1.");
   if (imageUrl && !validator.isURL(imageUrl, { require_protocol: true })) throw new Error("Image URL must begin with https:// or http://.");
+  if (revealImageUrl && !validator.isURL(revealImageUrl, { require_protocol: true }) && !revealImageUrl.startsWith("/")) throw new Error("Reveal image URL must begin with https://, http://, or /.");
   if (widthIn !== null && widthIn <= 0) throw new Error("Width must be positive.");
   if (heightIn !== null && heightIn <= 0) throw new Error("Height must be positive.");
   if (depthIn !== null && depthIn <= 0) throw new Error("Depth must be positive.");
@@ -79,10 +76,12 @@ function validateOriginalPayload(body, { allowMissingId = false } = {}) {
     size,
     year,
     description,
+    price,
     startingBid,
     bidIncrement,
     endsAt,
     imageUrl,
+    revealImageUrl,
     colorOne,
     colorTwo,
     widthIn,
@@ -469,8 +468,8 @@ app.post("/api/stripe/webhook", express.raw({ type: "application/json" }), async
 
 app.use(express.json());
 app.use("/api/admin", (req, res) => res.status(404).json({ error: "Admin tools are disabled." }));
-app.use("/api/bidders/register", bidderRegistrationLimiter);
-app.use("/api/originals/:id/bids", bidLimiter);
+app.use("/api/bidders", (req, res) => res.status(404).json({ error: "Bidding is no longer available." }));
+app.use("/api/originals/:id/bids", (req, res) => res.status(404).json({ error: "Bidding is no longer available." }));
 app.use(express.static(path.join(__dirname, "public")));
 
 app.get("/api/health", (req, res) => res.json({
@@ -491,7 +490,44 @@ app.get("/api/originals", (req, res) => {
 app.get("/api/originals/:id", (req, res) => {
   const art = db.getOriginalById(req.params.id);
   if (!art) return res.status(404).json({ error: "Original artwork not found." });
-  res.json({ original: { ...art, currentBid: db.getCurrentBid(art.id) } });
+  res.json({ original: art });
+});
+
+app.post("/api/originals/:id/shipping-rate", (req, res) => {
+  const art = db.getOriginalById(req.params.id);
+  if (!art) return res.status(404).json({ error: "Original artwork not found." });
+  const recipient = printShippingRecipient(req.body);
+  const validationError = validatePrintShippingRecipient(recipient);
+  if (validationError) return res.status(400).json({ error: validationError });
+  const estimate = estimateOriginalShipping({ ...art, destinationState: recipient.state_code });
+  res.json({ shipping: estimate.total, product: art.price, total: art.price + estimate.total, currency: "USD", name: "Estimated shipping", estimate });
+});
+
+app.post("/api/originals/:id/checkout", async (req, res) => {
+  if (!requireStripe(res)) return;
+  const art = db.getOriginalById(req.params.id);
+  if (!art) return res.status(404).json({ error: "Original artwork not found." });
+  if (art.status === "sold" || db.getPaidPaymentForOriginal(art.id)) return res.status(409).json({ error: "This original artwork has already been sold." });
+
+  const recipient = printShippingRecipient(req.body);
+  const validationError = validatePrintShippingRecipient(recipient);
+  if (validationError) return res.status(400).json({ error: validationError });
+  const estimate = estimateOriginalShipping({ ...art, destinationState: recipient.state_code });
+  const totalAmount = Math.round(Number(art.price) + Number(estimate.total));
+  const session = await stripe.checkout.sessions.create({
+    mode: "payment",
+    customer_email: recipient.email,
+    line_items: [
+      { price_data: { currency: "usd", unit_amount: Math.round(art.price * 100), product_data: { name: art.title, description: `${art.medium} · ${art.size}` } }, quantity: 1 },
+      { price_data: { currency: "usd", unit_amount: Math.round(estimate.total * 100), product_data: { name: "Shipping", description: "Estimated shipping and packaging" } }, quantity: 1 }
+    ],
+    shipping_address_collection: { allowed_countries: ["US"] },
+    metadata: { kind: "original", originalId: art.id },
+    success_url: `${BASE_URL}/success.html?session_id={CHECKOUT_SESSION_ID}`,
+    cancel_url: `${BASE_URL}/originals.html`
+  });
+  db.createPayment({ kind: "original", originalId: art.id, stripeSessionId: session.id, checkoutUrl: session.url, customerName: recipient.name, customerEmail: recipient.email, subtotalAmount: art.price, shippingAmount: estimate.total, totalAmount, amount: totalAmount, shippingJson: { recipient, estimate }, status: "pending" });
+  res.json({ checkoutUrl: session.url });
 });
 
 app.post("/api/bidders/register", async (req, res) => {
@@ -923,16 +959,11 @@ app.post("/api/admin/printful/sync-products", requireAdmin, async (req, res) => 
   }
 });
 
-app.get(["/", "/index.html", "/originals.html", "/prints.html", "/success.html", "/cancel.html", "/register.html", "/register-success.html", "/auction-policy.html", "/privacy.html", "/shipping-policy.html", "/terms.html"], (req, res) => {
+app.get(["/", "/index.html", "/originals.html", "/prints.html", "/success.html", "/cancel.html", "/privacy.html", "/shipping-policy.html", "/refunds-returns.html", "/terms.html"], (req, res) => {
   const file = req.path === "/" ? "index.html" : req.path.replace("/", "");
   res.sendFile(path.join(__dirname, "public", file));
 });
 
 app.listen(PORT, () => {
   console.log(`Rayan Rao Art site running at http://localhost:${PORT}`);
-  if (AUTO_CHARGE_AUCTIONS) {
-    console.log(`Automatic auction charging is enabled. Checking ended auctions every ${AUCTION_PROCESS_INTERVAL_MS / 1000} seconds.`);
-    setTimeout(() => processEndedAuctions().catch((error) => console.error("Initial auction charge processing failed:", error)), 5000);
-    setInterval(() => processEndedAuctions().catch((error) => console.error("Auction charge processing failed:", error)), AUCTION_PROCESS_INTERVAL_MS);
-  }
 });

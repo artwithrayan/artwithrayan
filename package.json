@@ -1,7 +1,7 @@
 {
   "name": "rayan-rao-art-production-iteration",
   "version": "5.0.0",
-  "description": "Art auction site with admin artwork manager, visible shipping estimates, automatic charging, Resend receipts, Printful sync, and production-readiness improvements.",
+  "description": "Fixed-price art site with visible shipping estimates, Resend receipts, Printful sync, and production-readiness improvements.",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",

@@ -15,10 +15,12 @@ CREATE TABLE IF NOT EXISTS originals (
   size TEXT NOT NULL,
   year TEXT NOT NULL,
   description TEXT NOT NULL,
+  price INTEGER NOT NULL DEFAULT 1,
   starting_bid INTEGER NOT NULL,
   bid_increment INTEGER NOT NULL DEFAULT 10,
   ends_at TEXT NOT NULL,
   image_url TEXT,
+  reveal_image_url TEXT,
   color_one TEXT NOT NULL,
   color_two TEXT NOT NULL,
   width_in REAL,
@@ -156,14 +158,14 @@ function ensureColumn(table, column, definition) {
 }
 
 const defaultSiteContent = {
-  announcement: "ORIGINALS BY AUCTION · PRINTS MADE TO ORDER · ART BY RAYAN RAO",
+  announcement: "ORIGINAL ARTWORK · PRINTS MADE TO ORDER · ART BY RAYAN RAO",
   heroTitle: "RAYAN RAO",
-  heroBlurb: "Original paintings by auction. Made-to-order prints fulfilled through Printful.",
+  heroBlurb: "Original paintings and made-to-order prints by Rayan Rao.",
   bannerImages: ["", "", "", ""],
   aboutLabel: "About",
   aboutTitle: "About the artist",
   aboutBody: "Rayan Rao is an artist whose work combines portraiture, expressive realism, and visual storytelling. His paintings explore identity, memory, imagination, and emotion through detailed compositions and bold, personal imagery.",
-  aboutSecondary: "Original paintings are released as one-of-one auction pieces. Prints and products are sold separately at fixed prices through made-to-order fulfillment.",
+  aboutSecondary: "Original paintings and prints are available at fixed prices. Prints and products are made to order through fulfillment partners.",
   aboutImage: ""
 };
 
@@ -184,6 +186,9 @@ function updateSiteContent(content) {
 
 // Migration-safe updates for older local databases.
 ensureColumn("originals", "status", "TEXT NOT NULL DEFAULT 'active'");
+ensureColumn("originals", "price", "INTEGER NOT NULL DEFAULT 1");
+ensureColumn("originals", "reveal_image_url", "TEXT");
+db.prepare("UPDATE originals SET price=starting_bid WHERE price IS NULL OR price <= 1").run();
 ensureColumn("originals", "width_in", "REAL");
 ensureColumn("originals", "height_in", "REAL");
 ensureColumn("originals", "depth_in", "REAL");
@@ -352,10 +357,12 @@ function normalizeOriginalRow(row) {
     size: row.size,
     year: row.year,
     description: row.description,
+    price: row.price || row.starting_bid,
     startingBid: row.starting_bid,
     bidIncrement: row.bid_increment,
     endsAt: row.ends_at,
     imageUrl: row.image_url,
+    revealImageUrl: row.reveal_image_url || "",
     colorOne: row.color_one,
     colorTwo: row.color_two,
     widthIn,
@@ -435,7 +442,7 @@ function getOriginals() {
     SELECT * FROM originals
     WHERE is_active = 1
       AND status != 'draft'
-    ORDER BY created_at DESC
+    ORDER BY CASE WHEN id = 'the-light' THEN 0 WHEN status = 'sold' THEN 2 ELSE 1 END ASC, created_at DESC
   `).all().map(normalizeOriginalRow);
 }
 
@@ -527,10 +534,12 @@ function createOriginalArtwork(item) {
     size: item.size,
     year: item.year,
     description: item.description,
+    price: Math.round(Number(item.price ?? item.startingBid)),
     startingBid: Math.round(Number(item.startingBid)),
     bidIncrement: Math.round(Number(item.bidIncrement)),
     endsAt: item.endsAt,
     imageUrl: item.imageUrl || "",
+    revealImageUrl: item.revealImageUrl || "",
     colorOne: item.colorOne || "#f4f4f4",
     colorTwo: item.colorTwo || "#d8d8d8",
     widthIn: item.widthIn === null || item.widthIn === undefined || item.widthIn === "" ? null : Number(item.widthIn),
@@ -543,9 +552,9 @@ function createOriginalArtwork(item) {
 
   db.prepare(`
     INSERT INTO originals
-    (id,title,medium,size,year,description,starting_bid,bid_increment,ends_at,image_url,color_one,color_two,width_in,height_in,depth_in,weight_lb,status,auto_charge_enabled,created_at,updated_at)
+    (id,title,medium,size,year,description,price,starting_bid,bid_increment,ends_at,image_url,reveal_image_url,color_one,color_two,width_in,height_in,depth_in,weight_lb,status,auto_charge_enabled,created_at,updated_at)
     VALUES
-    (@id,@title,@medium,@size,@year,@description,@startingBid,@bidIncrement,@endsAt,@imageUrl,@colorOne,@colorTwo,@widthIn,@heightIn,@depthIn,@weightLb,@status,@autoChargeEnabled,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)
+    (@id,@title,@medium,@size,@year,@description,@price,@startingBid,@bidIncrement,@endsAt,@imageUrl,@revealImageUrl,@colorOne,@colorTwo,@widthIn,@heightIn,@depthIn,@weightLb,@status,@autoChargeEnabled,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)
   `).run(payload);
 
   return getOriginalById(payload.id);
@@ -559,10 +568,12 @@ function updateOriginalArtwork(id, item) {
     size: item.size,
     year: item.year,
     description: item.description,
+    price: Math.round(Number(item.price ?? item.startingBid)),
     startingBid: Math.round(Number(item.startingBid)),
     bidIncrement: Math.round(Number(item.bidIncrement)),
     endsAt: item.endsAt,
     imageUrl: item.imageUrl || "",
+    revealImageUrl: item.revealImageUrl || "",
     colorOne: item.colorOne || "#f4f4f4",
     colorTwo: item.colorTwo || "#d8d8d8",
     widthIn: item.widthIn === null || item.widthIn === undefined || item.widthIn === "" ? null : Number(item.widthIn),
@@ -580,10 +591,12 @@ function updateOriginalArtwork(id, item) {
         size=@size,
         year=@year,
         description=@description,
+        price=@price,
         starting_bid=@startingBid,
         bid_increment=@bidIncrement,
         ends_at=@endsAt,
         image_url=@imageUrl,
+        reveal_image_url=@revealImageUrl,
         color_one=@colorOne,
         color_two=@colorTwo,
         width_in=@widthIn,
@@ -607,6 +620,11 @@ function archiveOriginalArtwork(id) {
         updated_at=CURRENT_TIMESTAMP
     WHERE id=?
   `).run(id);
+}
+
+function setOriginalRevealImageUrl(id, revealImageUrl) {
+  db.prepare(`UPDATE originals SET reveal_image_url=?, updated_at=CURRENT_TIMESTAMP WHERE id=? AND is_active=1`).run(revealImageUrl || "", id);
+  return getOriginalById(id);
 }
 
 function markOriginalPaymentPending(originalId) { markOriginalStatus(originalId, "payment_pending"); }
@@ -1018,6 +1036,7 @@ module.exports = {
   createOriginalArtwork,
   updateOriginalArtwork,
   archiveOriginalArtwork,
+  setOriginalRevealImageUrl,
   markOriginalPaymentPending,
   markOriginalSold,
   markOriginalAutoChargeProcessing,

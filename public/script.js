@@ -14,9 +14,9 @@ function timeRemaining(endsAt) {
   return `${days}d ${hours}h ${minutes}m left`;
 }
 
-function artworkImage(item) {
-  if (item.imageUrl) return `<div class="art-image" style="--c1:${item.colorOne}; --c2:${item.colorTwo}"><img src="${item.imageUrl}" alt="${item.title}"></div>`;
-  return `<div class="art-image" style="--c1:${item.colorOne}; --c2:${item.colorTwo}"></div>`;
+function artworkImage(item, className = "", imageAttributes = "") {
+  if (item.imageUrl) return `<div class="art-image ${className}" style="--c1:${item.colorOne}; --c2:${item.colorTwo}"><img src="${escapeHtml(item.imageUrl)}" alt="${escapeHtml(item.title)}" ${imageAttributes}></div>`;
+  return `<div class="art-image ${className}" style="--c1:${item.colorOne}; --c2:${item.colorTwo}"></div>`;
 }
 
 function ensurePrintDialog() {
@@ -62,16 +62,6 @@ function shippingBreakdownHtml(shipping) {
   `;
 }
 
-function updateBidTotal(form) {
-  const id = form.dataset.id;
-  const amountInput = form.querySelector("input[name='amount']");
-  const totalEl = document.getElementById(`bid-total-${id}`);
-  const shipping = Number(form.dataset.shipping || 0);
-  const bid = Number(amountInput.value || amountInput.min || 0);
-  const total = Math.round(bid + shipping);
-  totalEl.textContent = `${money(bid)} bid + ${money(shipping)} shipping/packaging = ${money(total)} estimated total if you win`;
-}
-
 async function renderOriginals() {
   const grid = document.getElementById("originalsGrid");
   if (!grid) return;
@@ -82,97 +72,108 @@ async function renderOriginals() {
     if (!originals.length) { grid.innerHTML = "<p>No original paintings are currently available.</p>"; return; }
 
     grid.innerHTML = originals.map((art) => {
-      const minimumNextBid = art.currentBid + art.bidIncrement;
-      const isActive = art.status === "active";
+      const isAvailable = art.status !== "sold";
       const shipping = art.shippingEstimate || { total: 0, packageType: "shipping estimate unavailable", breakdown: {} };
-      const estimatedCurrentTotal = Number(art.currentBid) + Number(shipping.total || 0);
-      const estimatedNextTotal = Number(minimumNextBid) + Number(shipping.total || 0);
 
       return `
         <article class="product-card" data-original-id="${art.id}">
-          ${artworkImage(art)}
+          ${artworkImage(art, "original-art-image", art.revealImageUrl ? `data-standard-image="${escapeHtml(art.imageUrl)}" data-reveal-image="${escapeHtml(art.revealImageUrl)}"` : "")}
           <div class="product-info">
-            <div class="product-title-row"><h3>${art.title}</h3><span class="current-bid" id="current-${art.id}">${money(art.currentBid)}</span></div>
+            <div class="product-title-row"><h3>${escapeHtml(art.title)}</h3><span class="price">${art.status === "sold" ? (Number(art.price) > 0 ? `Sold · ${money(art.price)}` : "Sold") : money(art.price)}</span></div>
             <p class="product-meta">${art.medium} · ${art.size} · ${art.year}</p>
-            <p>${art.description}</p>
-            <p class="countdown" data-ends="${art.endsAt}">${art.status === "sold" ? "Sold" : timeRemaining(art.endsAt)}</p>
+            <p>${escapeHtml(art.description)}</p>
             <section class="shipping-box">
-              <div class="shipping-row"><span>Current bid</span><strong id="visible-bid-${art.id}">${money(art.currentBid)}</strong></div>
-              <div class="shipping-row"><span>Estimated shipping/packaging</span><strong>${money(shipping.total)}</strong></div>
-              <div class="shipping-row total"><span>Estimated total if current bid wins</span><strong id="visible-total-${art.id}">${money(estimatedCurrentTotal)}</strong></div>
-              <p class="notice">Package basis: ${shipping.packageType}. This shipping/packaging estimate is charged to the winner in addition to the winning bid.</p>
+              <div class="shipping-row"><span>Price</span><strong>${money(art.price)}</strong></div>
+              <div class="shipping-row"><span>Shipping</span><strong>Calculated at checkout</strong></div>
             </section>
-            ${shippingBreakdownHtml(shipping)}
-            <p class="product-meta">Status: ${art.status.replace("_", " ")}</p>
           </div>
-          ${isActive ? `
-            <form class="bid-form" data-id="${art.id}" data-shipping="${shipping.total}">
-              <input name="bidderEmail" type="email" placeholder="Registered email address" required />
-              <input name="amount" type="number" min="${minimumNextBid}" placeholder="Bid ${money(minimumNextBid)} or higher" required />
-              <p class="bid-total-preview" id="bid-total-${art.id}">${money(minimumNextBid)} bid + ${money(shipping.total)} shipping/packaging = ${money(estimatedNextTotal)} estimated total if you win</p>
-              <button type="submit">Place binding bid</button>
-            </form>
-            <p class="notice">You must <a href="register.html">register to bid</a>. If you are highest when bidding closes, your saved Stripe payment method is automatically charged for the winning bid plus the displayed estimated shipping/packaging.</p>
-          ` : ""}
+          ${art.revealImageUrl ? `<button type="button" class="shine-button" data-id="${art.id}" aria-pressed="false">Shine a light</button>` : ""}
+          ${isAvailable ? `<button type="button" class="purchase-original" data-id="${art.id}">Purchase original</button>` : `<p class="notice">Sold</p>`}
           <p class="notice" id="notice-${art.id}"></p>
         </article>`;
     }).join("");
-    attachBidHandlers();
+    attachRevealHandlers();
+    attachOriginalPurchaseHandlers(originals);
   } catch (error) {
     grid.innerHTML = `<p class="notice error">Could not load originals. Make sure the backend is running.</p>`;
   }
 }
 
-function attachBidHandlers() {
-  document.querySelectorAll(".bid-form").forEach((form) => {
-    const amountInput = form.querySelector("input[name='amount']");
-    amountInput.addEventListener("input", () => updateBidTotal(form));
-    updateBidTotal(form);
-
-    form.addEventListener("submit", async (event) => {
-      event.preventDefault();
-      const id = form.dataset.id;
-      const notice = document.getElementById(`notice-${id}`);
-      const button = form.querySelector("button");
-      const formData = new FormData(form);
-      const shipping = Number(form.dataset.shipping || 0);
-      const bidAmount = Number(formData.get("amount"));
-      const total = Math.round(bidAmount + shipping);
-
-      if (!window.confirm(`Place binding bid of ${money(bidAmount)}? If you win, your saved payment method will be charged approximately ${money(total)} including estimated shipping/packaging.`)) {
-        return;
-      }
-
-      notice.className = "notice";
-      notice.textContent = "Submitting bid...";
-      button.disabled = true;
-      try {
-        const data = await fetchJson(`${API}/api/originals/${id}/bids`, { method: "POST", body: JSON.stringify({ bidderEmail: formData.get("bidderEmail"), amount: bidAmount }) });
-        document.getElementById(`current-${id}`).textContent = money(data.currentBid);
-        document.getElementById(`visible-bid-${id}`).textContent = money(data.currentBid);
-        document.getElementById(`visible-total-${id}`).textContent = money(data.currentBid + shipping);
-        amountInput.min = data.minimumNextBid;
-        amountInput.placeholder = `Bid ${money(data.minimumNextBid)} or higher`;
-        amountInput.value = "";
-        updateBidTotal(form);
-        notice.className = "notice success";
-        notice.textContent = `Bid placed. If you win, your saved payment method will be charged for your winning bid plus ${money(shipping)} estimated shipping/packaging.`;
-      } catch (error) {
-        notice.className = "notice error";
-        notice.textContent = error.message;
-      } finally { button.disabled = false; }
+function attachRevealHandlers() {
+  document.querySelectorAll(".shine-button").forEach((button) => {
+    button.addEventListener("click", () => {
+      const card = button.closest(".product-card");
+      const image = card?.querySelector(".original-art-image img");
+      if (!image) return;
+      const revealed = image.dataset.revealed === "true";
+      image.src = revealed ? image.dataset.standardImage : image.dataset.revealImage;
+      image.dataset.revealed = String(!revealed);
+      button.setAttribute("aria-pressed", String(!revealed));
+      button.textContent = revealed ? "Shine a light" : "Return to normal light";
+      card?.querySelector(".original-art-image")?.classList.toggle("is-revealed", !revealed);
     });
+  });
+}
+
+function attachOriginalPurchaseHandlers(originals) {
+  document.querySelectorAll(".purchase-original").forEach((button) => {
+    button.addEventListener("click", () => {
+      const art = originals.find((item) => String(item.id) === String(button.dataset.id));
+      if (!art) return;
+      const dialog = ensurePrintDialog();
+      const content = dialog.querySelector("#printDialogContent");
+      content.innerHTML = `<div class="dialog-heading"><p class="section-label">Original artwork</p><h2>${escapeHtml(art.title)}</h2><p>${escapeHtml(art.description)}</p><p class="dialog-price">${money(art.price)} before shipping</p></div><form class="checkout-form original-checkout-form" data-id="${art.id}"><input name="name" type="text" placeholder="Full name" required /><input name="email" type="email" placeholder="Email for receipt" required /><input name="address1" type="text" placeholder="Address" required /><input name="address2" type="text" placeholder="Apartment, suite, etc. (optional)" /><div class="form-grid compact-grid"><input name="city" type="text" placeholder="City" required /><select name="state" required>${US_STATE_OPTIONS}</select><input name="postalCode" type="text" placeholder="ZIP code" required /></div><input name="country" type="text" value="US" placeholder="Country" required /><button type="button" class="quote-shipping">Calculate shipping</button><button type="submit" disabled>Continue to Stripe</button></form><p class="notice">Enter your mailing address to see the shipping estimate.</p>`;
+      attachOriginalCheckoutHandlers(content, art);
+      dialog.showModal();
+    });
+  });
+}
+
+function attachOriginalCheckoutHandlers(content, art) {
+  const form = content.querySelector(".original-checkout-form");
+  const quoteButton = form.querySelector(".quote-shipping");
+  const checkoutButton = form.querySelector("button[type=submit]");
+  const notice = content.querySelector(".notice");
+  quoteButton.addEventListener("click", async () => {
+    quoteButton.disabled = true;
+    notice.className = "notice";
+    notice.textContent = "Calculating shipping...";
+    try {
+      const data = await fetchJson(`${API}/api/originals/${art.id}/shipping-rate`, { method: "POST", body: JSON.stringify(Object.fromEntries(new FormData(form).entries())) });
+      checkoutButton.disabled = false;
+      notice.textContent = `Shipping: ${money(data.shipping)}. Estimated total: ${money(data.total)}.`;
+    } catch (error) {
+      notice.className = "notice error";
+      notice.textContent = error.message;
+    } finally { quoteButton.disabled = false; }
+  });
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    checkoutButton.disabled = true;
+    notice.className = "notice";
+    notice.textContent = "Creating secure checkout...";
+    try {
+      const data = await fetchJson(`${API}/api/originals/${art.id}/checkout`, { method: "POST", body: JSON.stringify(Object.fromEntries(new FormData(form).entries())) });
+      window.location.href = data.checkoutUrl;
+    } catch (error) {
+      notice.className = "notice error";
+      notice.textContent = error.message;
+      checkoutButton.disabled = false;
+    }
   });
 }
 
 function renderPrintGallery(artworks, grid) {
   if (!artworks.length) { grid.innerHTML = "<p>No artworks are currently available.</p>"; return; }
-  grid.innerHTML = artworks.map((artwork) => `
+  grid.innerHTML = artworks.map((artwork) => {
+    const productCount = new Set(artwork.products.map((product) => product.productType)).size;
+    return `
     <article class="product-card gallery-card">
       ${artworkImage(artwork)}
-      <div class="product-info"><div class="product-title-row"><h3>${artwork.title}</h3><span class="product-count">${artwork.products.length} product${artwork.products.length === 1 ? "" : "s"}</span></div></div>
+      <div class="product-info"><div class="product-title-row"><h3>${artwork.title}</h3><span class="product-count">${productCount} product${productCount === 1 ? "" : "s"}</span></div></div>
       <button type="button" class="view-products" data-artwork-key="${artwork.key}">View products</button>
-    </article>`).join("");
+    </article>`;
+  }).join("");
   attachArtworkPurchaseHandlers(artworks);
 }
 
