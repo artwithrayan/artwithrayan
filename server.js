@@ -964,6 +964,19 @@ app.get(["/", "/index.html", "/originals.html", "/prints.html", "/success.html",
   res.sendFile(path.join(__dirname, "public", file));
 });
 
-app.listen(PORT, () => {
+async function syncPrintfulOnStartup() {
+  if (String(process.env.PRINTFUL_SYNC_ON_STARTUP || "false").toLowerCase() !== "true") return;
+  try {
+    const syncData = await printful.fetchPrintfulProductsForWebsite();
+    const results = db.upsertPrintfulPrints(syncData.importedProducts);
+    console.log(`[printful startup sync] imported ${syncData.importedProducts.length} variants from ${syncData.printfulProductCount} products; created ${results.filter((item) => item.action === "created").length}, updated ${results.filter((item) => item.action === "updated").length}`);
+    if (syncData.skipped.length) console.warn(`[printful startup sync] skipped ${syncData.skipped.length} products or variants.`);
+  } catch (error) {
+    console.error("[printful startup sync] failed:", error.message || error);
+  }
+}
+
+app.listen(PORT, async () => {
   console.log(`Rayan Rao Art site running at http://localhost:${PORT}`);
+  await syncPrintfulOnStartup();
 });

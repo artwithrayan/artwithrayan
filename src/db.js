@@ -2,7 +2,7 @@ const path = require("path");
 const Database = require("better-sqlite3");
 const { parseSizeInches, estimateOriginalShipping } = require("./shipping");
 
-const dbPath = path.join(__dirname, "..", "data.sqlite");
+const dbPath = process.env.DB_PATH || path.join(__dirname, "..", "data.sqlite");
 const db = new Database(dbPath);
 
 db.pragma("journal_mode = WAL");
@@ -242,7 +242,7 @@ function slugify(value) {
     .slice(0, 70) || "print";
 }
 
-if (db.prepare("SELECT COUNT(*) AS count FROM originals").get().count === 0) {
+if (false) {
   const insert = db.prepare(`
     INSERT INTO originals
     (id,title,medium,size,year,description,starting_bid,bid_increment,ends_at,image_url,color_one,color_two,width_in,height_in,depth_in,weight_lb,status,auto_charge_enabled)
@@ -311,7 +311,7 @@ if (db.prepare("SELECT COUNT(*) AS count FROM originals").get().count === 0) {
   seed(rows);
 }
 
-if (db.prepare("SELECT COUNT(*) AS count FROM prints").get().count === 0) {
+if (false) {
   const insert = db.prepare(`
     INSERT INTO prints
     (id,title,product_type,sizes,price,description,checkout_url,image_url,color_one,color_two,printful_variant_id,printful_sync_variant_id,printful_product_id,printful_currency,print_file_url,source,status)
@@ -341,6 +341,24 @@ if (db.prepare("SELECT COUNT(*) AS count FROM prints").get().count === 0) {
 
   const seed = db.transaction((items) => items.forEach((item) => insert.run(item)));
   seed(rows);
+}
+
+// A fresh production database starts with the real catalog, never placeholder listings.
+if (db.prepare("SELECT COUNT(*) AS count FROM originals").get().count === 0) {
+  const insert = db.prepare(`
+    INSERT INTO originals
+    (id,title,medium,size,year,description,price,starting_bid,bid_increment,ends_at,image_url,reveal_image_url,color_one,color_two,width_in,height_in,depth_in,weight_lb,status,is_active,auto_charge_enabled)
+    VALUES
+    (@id,@title,@medium,@size,@year,@description,@price,@price,@bidIncrement,@endsAt,@imageUrl,@revealImageUrl,@colorOne,@colorTwo,@widthIn,@heightIn,@depthIn,@weightLb,@status,@isActive,@autoChargeEnabled)
+  `);
+  const rows = [
+    { id: "the-light", title: "The Light", medium: "Acrylic paint", size: "9 x 12 inches", year: "2026", description: "An acrylic painting of sunlight moving through a lush forest stream.", price: 400, bidIncrement: 10, endsAt: "2099-12-31T23:59:59.000Z", imageUrl: "/images/the-light.jpg", revealImageUrl: "/images/the-light-reveal.jpg", colorOne: "#173a2c", colorTwo: "#d8d5a2", widthIn: 9, heightIn: 12, depthIn: 2, weightLb: 4, status: "active", isActive: 1, autoChargeEnabled: 0 },
+    { id: "the-wading-man", title: "The Wading Man", medium: "Acrylic on canvas", size: "9 x 12 inches", year: "2026", description: "An acrylic painting of a solitary figure wading through a luminous garden landscape.", price: 200, bidIncrement: 10, endsAt: "2099-12-31T23:59:59.000Z", imageUrl: "/images/the-wading-man.jpg", revealImageUrl: "", colorOne: "#174c68", colorTwo: "#e2b85d", widthIn: 9, heightIn: 12, depthIn: 2, weightLb: 4, status: "active", isActive: 1, autoChargeEnabled: 0 },
+    { id: "flower", title: "Flower", medium: "Paper", size: "9 x 12 inches", year: "2026", description: "A luminous paper painting of a flower floating across blue water.", price: 200, bidIncrement: 10, endsAt: "2099-12-31T23:59:59.000Z", imageUrl: "/images/flower.jpg", revealImageUrl: "", colorOne: "#2d75a0", colorTwo: "#d8d1a2", widthIn: 9, heightIn: 12, depthIn: 0.25, weightLb: 1, status: "active", isActive: 1, autoChargeEnabled: 0 },
+    { id: "wine-night", title: "Wine Night", medium: "Canvas", size: "Size not specified", year: "2026", description: "Sold original artwork.", price: 775, bidIncrement: 10, endsAt: "2099-12-31T23:59:59.000Z", imageUrl: "/images/wine-night.jpg", revealImageUrl: "", colorOne: "#25252a", colorTwo: "#d36a31", widthIn: 18, heightIn: 24, depthIn: 2, weightLb: 4, status: "sold", isActive: 1, autoChargeEnabled: 0 },
+    { id: "dogs-playing-poker-original", title: "Dogs Playing Poker", medium: "Canvas", size: "Size not specified", year: "2026", description: "Sold original artwork.", price: 500, bidIncrement: 10, endsAt: "2099-12-31T23:59:59.000Z", imageUrl: "/images/dogs-playing-poker-original.jpg", revealImageUrl: "", colorOne: "#26190f", colorTwo: "#3e6e18", widthIn: 18, heightIn: 24, depthIn: 2, weightLb: 4, status: "sold", isActive: 1, autoChargeEnabled: 0 }
+  ];
+  db.transaction((items) => items.forEach((item) => insert.run(item)))(rows);
 }
 
 function normalizeOriginalRow(row) {
