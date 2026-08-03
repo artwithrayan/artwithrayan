@@ -229,18 +229,20 @@ async function createDraftOrderFromStripeSession({ payment, print, stripeSession
   if (!autoCreate) { console.log("[printful skipped] PRINTFUL_AUTO_CREATE_DRAFT_ORDER is false."); return { skipped: true, reason: "Auto creation disabled." }; }
   if (!getPrintfulToken()) { console.log("[printful skipped] PRINTFUL_API_KEY is not configured."); return { skipped: true, reason: "Missing Printful API key." }; }
 
+  let storedRecipient = null;
+  try { storedRecipient = payment.shipping_json ? JSON.parse(payment.shipping_json).recipient : null; } catch { storedRecipient = null; }
   const address = stripeSession.customer_details?.address;
-  const name = stripeSession.customer_details?.name;
-  if (!address || !name) { console.log("[printful skipped] Missing Stripe shipping address/customer name."); return { skipped: true, reason: "Missing customer shipping details." }; }
+  const name = storedRecipient?.name || stripeSession.customer_details?.name;
+  if ((!address && !storedRecipient) || !name) { console.log("[printful skipped] Missing shipping address/customer name."); return { skipped: true, reason: "Missing customer shipping details." }; }
 
   const recipient = {
     name,
-    address1: address.line1,
-    address2: address.line2 || "",
-    city: address.city,
-    state_code: address.state || "",
-    country_code: address.country,
-    zip: address.postal_code
+    address1: storedRecipient?.address1 || address.line1,
+    address2: storedRecipient?.address2 || address.line2 || "",
+    city: storedRecipient?.city || address.city,
+    state_code: storedRecipient?.state_code || address.state || "",
+    country_code: storedRecipient?.country_code || address.country,
+    zip: storedRecipient?.zip || address.postal_code
   };
 
   let shippingJson = {};
@@ -249,13 +251,13 @@ async function createDraftOrderFromStripeSession({ payment, print, stripeSession
   if (print.printfulSyncVariantId) {
     const item = { sync_variant_id: Number(print.printfulSyncVariantId), quantity: 1 };
     if (Array.isArray(print.printfulOptions) && print.printfulOptions.length) item.options = print.printfulOptions;
-    const payload = { shipping: shippingJson.method || undefined, recipient, items: [item] };
+    const payload = { external_id: `stripe-${payment.stripe_session_id}`, shipping: shippingJson.method || undefined, recipient, items: [item] };
     const data = await printfulFetch("/orders?confirm=false", { method: "POST", body: JSON.stringify(payload) });
     return { printfulOrderId: data?.result?.id || data?.id || data?.data?.id, data };
   }
 
   if (print.printfulVariantId && print.printFileUrl) {
-    const payload = { shipping: shippingJson.method || undefined, recipient, items: [{ variant_id: Number(print.printfulVariantId), quantity: 1, files: [{ url: print.printFileUrl }] }] };
+    const payload = { external_id: `stripe-${payment.stripe_session_id}`, shipping: shippingJson.method || undefined, recipient, items: [{ variant_id: Number(print.printfulVariantId), quantity: 1, files: [{ url: print.printFileUrl }] }] };
     const data = await printfulFetch("/orders?confirm=false", { method: "POST", body: JSON.stringify(payload) });
     return { printfulOrderId: data?.result?.id || data?.id || data?.data?.id, data };
   }

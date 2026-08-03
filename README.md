@@ -52,6 +52,8 @@ PRINTFUL_API_KEY=your_printful_api_key
 PRINTFUL_WEBHOOK_SECRET=use_a_long_random_secret
 PRINTFUL_WEBHOOK_URL=https://your-render-site.onrender.com/api/printful/webhook?token=use_a_long_random_secret
 PRINTFUL_WEBHOOK_ON_STARTUP=false
+PRINTFUL_SYNC_ON_STARTUP=false
+PRINT_CLUB_ENABLED=false
 
 AUTO_CHARGE_AUCTIONS=true
 AUCTION_PROCESS_INTERVAL_MS=60000
@@ -65,7 +67,7 @@ Automatic bidder approval requires the Stripe webhook while testing locally:
 stripe listen --forward-to localhost:3000/api/stripe/webhook
 ```
 
-Paste the `whsec_...` value into `.env` as `STRIPE_WEBHOOK_SECRET`, restart `npm run dev`, and keep the Stripe CLI terminal running.
+Paste the `whsec_...` value into `.env` as `STRIPE_WEBHOOK_SECRET`, restart `npm run dev`, and keep the Stripe CLI terminal running. The production Stripe endpoint should receive `checkout.session.completed` and `checkout.session.expired`.
 
 ## Printful shipment tracking emails
 

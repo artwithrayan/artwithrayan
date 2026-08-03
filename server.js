@@ -1,6 +1,7 @@
 require("dotenv").config();
 
 const path = require("path");
+const crypto = require("crypto");
 const express = require("express");
 const rateLimit = require("express-rate-limit");
 const helmet = require("helmet");
@@ -19,6 +20,24 @@ const PORT = process.env.PORT || 3000;
 const BASE_URL = process.env.BASE_URL || `http://localhost:${PORT}`;
 const stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SECRET_KEY) : null;
 const AUTO_CHARGE_AUCTIONS = false;
+
+app.set("trust proxy", 1);
+
+const quoteRateLimit = rateLimit({
+  windowMs: 60 * 1000,
+  limit: 60,
+  standardHeaders: "draft-8",
+  legacyHeaders: false,
+  message: { error: "Too many shipping requests. Please wait a minute and try again." }
+});
+
+const checkoutRateLimit = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 20,
+  standardHeaders: "draft-8",
+  legacyHeaders: false,
+  message: { error: "Too many checkout attempts. Please wait and try again." }
+});
 
 function slugifyId(value) {
   return String(value || "")
@@ -96,7 +115,12 @@ function validateOriginalPayload(body, { allowMissingId = false } = {}) {
 
 
 app.use(helmet({ contentSecurityPolicy: false }));
-app.use(morgan("dev"));
+app.use(morgan((tokens, req, res) => [
+  tokens.method(req, res),
+  req.path,
+  tokens.status(req, res),
+  tokens["response-time"](req, res), "ms"
+].join(" ")));
 
 function requireStripe(res) {
   if (!stripe) {
@@ -318,6 +342,21 @@ app.post("/api/stripe/webhook", express.raw({ type: "application/json" }), async
 
   try {
     console.log(`[stripe webhook] received ${event.type}${event.data?.object?.id ? ` (${event.data.object.id})` : ""}`);
+    if (event.type === "checkout.session.expired") {
+      const expiredSession = event.data.object;
+      let expiredPayment = db.getPaymentByStripeSessionId(expiredSession.id);
+      if (!expiredPayment && expiredSession.metadata?.localPaymentId) {
+        expiredPayment = db.getPaymentById(expiredSession.metadata.localPaymentId);
+        if (expiredPayment) db.setPaymentCheckoutSession(expiredPayment.id, expiredSession.id, expiredPayment.checkout_url);
+      }
+      if (expiredPayment) {
+        if (expiredPayment.kind === "print" && expiredPayment.print_id) db.releasePrintStockReservation(expiredPayment.print_id);
+        if (expiredPayment.kind === "original" && expiredPayment.original_id) db.releaseOriginalCheckout(expiredPayment.original_id);
+        db.markPaymentCancelled(expiredSession.id);
+      }
+      return res.json({ received: true, handled: Boolean(expiredPayment) });
+    }
+
     if (event.type === "checkout.session.completed") {
       const session = event.data.object;
 
@@ -358,7 +397,15 @@ app.post("/api/stripe/webhook", express.raw({ type: "application/json" }), async
       }
 
       if (session.mode === "payment") {
-        const payment = db.getPaymentByStripeSessionId(session.id);
+        let payment = db.getPaymentByStripeSessionId(session.id);
+        if (!payment && session.metadata?.localPaymentId) {
+          payment = db.getPaymentById(session.metadata.localPaymentId);
+          if (payment) db.setPaymentCheckoutSession(payment.id, session.id, payment.checkout_url);
+        }
+        if (!payment) {
+          console.error(`[stripe webhook] no local payment record for completed session ${session.id}`);
+          return res.status(500).json({ error: "Payment record not found." });
+        }
         const paidPrint = payment?.kind === "print" ? db.getPrintById(payment.print_id) : null;
         const shouldProcessPrintful = payment?.kind === "print" && paidPrint?.fulfillmentType !== "self" && !payment.printful_order_id;
         if (payment && (payment.status !== "paid" || shouldProcessPrintful)) {
@@ -373,8 +420,13 @@ app.post("/api/stripe/webhook", express.raw({ type: "application/json" }), async
             console.log(`[print order] paid session=${session.id} print=${print?.title || payment.print_id}`);
             if (!wasAlreadyPaid) {
               if (print?.fulfillmentType === "self") {
-                const stockReserved = db.decrementPrintStock(print.id);
-                if (!stockReserved) console.warn(`[self fulfillment] stock was already depleted for order ${payment.id}`);
+                const stockFinalized = db.finalizePrintStockReservation(print.id);
+                if (!stockFinalized) {
+                  const refund = session.payment_intent ? await stripe.refunds.create({ payment_intent: session.payment_intent, reason: "requested_by_customer" }) : null;
+                  db.markPaymentFailed(session.id, "Self-fulfilled stock was unavailable after payment.");
+                  console.error(`[self fulfillment] stock was unavailable after payment ${payment.id}; refund=${refund?.id || "not-created"}`);
+                  return res.status(500).json({ error: "Stock reservation could not be finalized." });
+                }
               } else {
                 console.log(`[printful fulfillment] paid order ${payment.id} is ready for fulfillment`);
               }
@@ -480,7 +532,7 @@ app.get("/api/originals/:id", (req, res) => {
   res.json({ original: art });
 });
 
-app.post("/api/originals/:id/shipping-rate", (req, res) => {
+app.post("/api/originals/:id/shipping-rate", quoteRateLimit, (req, res) => {
   const art = db.getOriginalById(req.params.id);
   if (!art) return res.status(404).json({ error: "Original artwork not found." });
   const recipient = printShippingRecipient(req.body);
@@ -490,7 +542,7 @@ app.post("/api/originals/:id/shipping-rate", (req, res) => {
   res.json({ shipping: estimate.total, product: art.price, total: art.price + estimate.total, currency: "USD", name: "Estimated shipping", estimate });
 });
 
-app.post("/api/originals/:id/checkout", async (req, res) => {
+app.post("/api/originals/:id/checkout", checkoutRateLimit, async (req, res) => {
   if (!requireStripe(res)) return;
   const art = db.getOriginalById(req.params.id);
   if (!art) return res.status(404).json({ error: "Original artwork not found." });
@@ -501,24 +553,36 @@ app.post("/api/originals/:id/checkout", async (req, res) => {
   if (validationError) return res.status(400).json({ error: validationError });
   const estimate = estimateOriginalShipping({ ...art, destinationState: recipient.state_code });
   const totalAmount = Math.round(Number(art.price) + Number(estimate.total));
-  const session = await stripe.checkout.sessions.create({
-    mode: "payment",
-    customer_email: recipient.email,
-    payment_intent_data: { receipt_email: recipient.email },
-    line_items: [
-      { price_data: { currency: "usd", unit_amount: Math.round(art.price * 100), product_data: { name: art.title, description: `${art.medium} · ${art.size}` } }, quantity: 1 },
-      { price_data: { currency: "usd", unit_amount: Math.round(estimate.total * 100), product_data: { name: "Shipping", description: "Estimated shipping and packaging" } }, quantity: 1 }
-    ],
-    shipping_address_collection: { allowed_countries: ["US"] },
-    metadata: { kind: "original", originalId: art.id },
-    success_url: `${BASE_URL}/success.html?session_id={CHECKOUT_SESSION_ID}`,
-    cancel_url: `${BASE_URL}/originals.html`
-  });
-  db.createPayment({ kind: "original", originalId: art.id, stripeSessionId: session.id, checkoutUrl: session.url, customerName: recipient.name, customerEmail: recipient.email, subtotalAmount: art.price, shippingAmount: estimate.total, totalAmount, amount: totalAmount, shippingJson: { recipient, estimate }, status: "pending" });
-  res.json({ checkoutUrl: session.url });
+  if (!db.reserveOriginalCheckout(art.id)) return res.status(409).json({ error: "This original is currently unavailable or already being purchased." });
+
+  let payment = null;
+  try {
+    payment = db.createPayment({ kind: "original", originalId: art.id, stripeSessionId: `pending-${crypto.randomUUID()}`, checkoutUrl: "pending", customerName: recipient.name, customerEmail: recipient.email, subtotalAmount: art.price, shippingAmount: estimate.total, totalAmount, amount: totalAmount, shippingJson: { recipient, estimate }, status: "pending" });
+    const session = await stripe.checkout.sessions.create({
+      mode: "payment",
+      customer_email: recipient.email,
+      payment_intent_data: { receipt_email: recipient.email },
+      line_items: [
+        { price_data: { currency: "usd", unit_amount: Math.round(art.price * 100), product_data: { name: art.title, description: `${art.medium} · ${art.size}` } }, quantity: 1 },
+        { price_data: { currency: "usd", unit_amount: Math.round(estimate.total * 100), product_data: { name: "Shipping", description: "Estimated shipping and packaging" } }, quantity: 1 }
+      ],
+      metadata: { kind: "original", originalId: art.id, localPaymentId: String(payment.id) },
+      success_url: `${BASE_URL}/success.html?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${BASE_URL}/originals.html`
+    });
+    db.setPaymentCheckoutSession(payment.id, session.id, session.url);
+    res.json({ checkoutUrl: session.url });
+  } catch (error) {
+    if (payment) db.markPaymentFailed(payment.stripe_session_id, error.message || "Could not create checkout.");
+    db.releaseOriginalCheckout(art.id);
+    throw error;
+  }
 });
 
-app.post("/api/print-club/checkout", async (req, res) => {
+app.post("/api/print-club/checkout", checkoutRateLimit, async (req, res) => {
+  if (String(process.env.PRINT_CLUB_ENABLED || "false").toLowerCase() !== "true") {
+    return res.status(503).json({ error: "Print Club checkout is coming soon." });
+  }
   if (!requireStripe(res)) return;
   const priceId = String(process.env.STRIPE_PRINT_CLUB_PRICE_ID || "").trim();
   if (!priceId) {
@@ -728,7 +792,7 @@ async function getPrintShippingQuote(print, body) {
   };
 }
 
-app.post("/api/prints/:id/shipping-rate", async (req, res) => {
+app.post("/api/prints/:id/shipping-rate", quoteRateLimit, async (req, res) => {
   try {
     const print = db.getPrintById(req.params.id);
     if (!print) return res.status(404).json({ error: "Print product not found." });
@@ -737,7 +801,7 @@ app.post("/api/prints/:id/shipping-rate", async (req, res) => {
   } catch (error) { res.status(error.statusCode || 502).json({ error: error.message || "Could not calculate shipping." }); }
 });
 
-app.post("/api/prints/:id/checkout", async (req, res) => {
+app.post("/api/prints/:id/checkout", checkoutRateLimit, async (req, res) => {
   if (!requireStripe(res)) return;
   const print = db.getPrintById(req.params.id);
   if (!print) return res.status(404).json({ error: "Print product not found." });
@@ -749,10 +813,14 @@ app.post("/api/prints/:id/checkout", async (req, res) => {
   const { recipient, rate, shippingAmount, fulfillmentTax } = quote;
   const customerEmail = recipient.email;
   const shippingCents = Math.round(shippingAmount * 100);
+  const shouldReserveStock = print.fulfillmentType === "self" && print.stockQuantity !== null;
+  if (shouldReserveStock && !db.reservePrintStock(print.id)) {
+    return res.status(409).json({ error: "This product is currently unavailable or already being purchased." });
+  }
+  let payment = null;
   const sessionConfig = {
     mode: "payment",
     line_items: [{ price_data: { currency: "usd", unit_amount: Math.round(print.price * 100), product_data: { name: print.title, description: `${print.productType} · ${print.sizes}` } }, quantity: 1 }],
-    shipping_address_collection: { allowed_countries: ["US"] },
     customer_email: customerEmail,
     payment_intent_data: { receipt_email: customerEmail },
     metadata: { kind: "print", printId: print.id, fulfillmentType: print.fulfillmentType || "printful" },
@@ -761,9 +829,17 @@ app.post("/api/prints/:id/checkout", async (req, res) => {
   };
   sessionConfig.line_items.push({ price_data: { currency: "usd", unit_amount: shippingCents, product_data: { name: "Shipping", description: rate.name || "Shipping" } }, quantity: 1 });
   if (fulfillmentTax > 0) sessionConfig.line_items.push({ price_data: { currency: "usd", unit_amount: Math.round(fulfillmentTax * 100), product_data: { name: "Printful fulfillment tax", description: "Estimated Printful fulfillment tax" } }, quantity: 1 });
-  const session = await stripe.checkout.sessions.create(sessionConfig);
-  db.createPayment({ kind: "print", printId: print.id, stripeSessionId: session.id, checkoutUrl: session.url, customerName: recipient.name, customerEmail, subtotalAmount: print.price, shippingAmount, totalAmount: print.price + shippingAmount + fulfillmentTax, amount: print.price + shippingAmount + fulfillmentTax, shippingJson: { recipient, method: rate.id, name: rate.name, rate: shippingAmount, fulfillmentTax, fulfillmentCosts: quote.fulfillmentCosts || null, currency: rate.currency, estimate: quote.selfEstimate || null }, status: "pending" });
-  res.json({ checkoutUrl: session.url });
+  try {
+    payment = db.createPayment({ kind: "print", printId: print.id, stripeSessionId: `pending-${crypto.randomUUID()}`, checkoutUrl: "pending", customerName: recipient.name, customerEmail, subtotalAmount: print.price, shippingAmount, totalAmount: print.price + shippingAmount + fulfillmentTax, amount: print.price + shippingAmount + fulfillmentTax, shippingJson: { recipient, method: rate.id, name: rate.name, rate: shippingAmount, fulfillmentTax, fulfillmentCosts: quote.fulfillmentCosts || null, currency: rate.currency, estimate: quote.selfEstimate || null }, status: "pending" });
+    sessionConfig.metadata.localPaymentId = String(payment.id);
+    const session = await stripe.checkout.sessions.create(sessionConfig);
+    db.setPaymentCheckoutSession(payment.id, session.id, session.url);
+    res.json({ checkoutUrl: session.url });
+  } catch (error) {
+    if (payment) db.markPaymentFailed(payment.stripe_session_id, error.message || "Could not create checkout.");
+    if (shouldReserveStock) db.releasePrintStockReservation(print.id);
+    throw error;
+  }
 });
 
 app.get("/api/admin/originals", requireAdmin, (req, res) => {
@@ -998,9 +1074,20 @@ async function configurePrintfulWebhookOnStartup() {
     console.error("[printful webhook setup] PRINTFUL_WEBHOOK_URL is not configured.");
     return;
   }
+  if (/your-site\.onrender\.com/i.test(webhookUrl)) {
+    console.error("[printful webhook setup] Refusing to configure the placeholder your-site.onrender.com URL.");
+    return;
+  }
   try {
     const result = await printful.configureWebhooks({ url: webhookUrl, types: ["package_shipped"] });
-    console.log(`[printful webhook setup] configured ${result?.result?.url || webhookUrl}`);
+    const configuredUrl = result?.result?.url || webhookUrl;
+    let safeConfiguredUrl = configuredUrl;
+    try {
+      const parsed = new URL(configuredUrl);
+      safeConfiguredUrl = `${parsed.origin}${parsed.pathname}`;
+    } catch { /* Keep a non-sensitive fallback for malformed configuration. */ }
+    console.log(`[printful webhook setup] configured ${safeConfiguredUrl}`);
+    console.warn("[printful webhook setup] Set PRINTFUL_WEBHOOK_ON_STARTUP=false after this one-time setup.");
   } catch (error) {
     console.error("[printful webhook setup] failed:", error.message || error);
   }
@@ -1008,6 +1095,8 @@ async function configurePrintfulWebhookOnStartup() {
 
 app.listen(PORT, async () => {
   console.log(`Rayan Rao Art site running at http://localhost:${PORT}`);
+  const releasedReservations = db.releaseStaleCheckoutReservations();
+  if (releasedReservations) console.log(`[checkout cleanup] released ${releasedReservations} stale reservation(s)`);
   await syncPrintfulOnStartup();
   await configurePrintfulWebhookOnStartup();
 });

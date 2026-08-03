@@ -91,6 +91,7 @@ CREATE TABLE IF NOT EXISTS prints (
   print_file_url TEXT,
   fulfillment_type TEXT NOT NULL DEFAULT 'printful',
   stock_quantity INTEGER,
+  stock_reserved INTEGER NOT NULL DEFAULT 0,
   width_in REAL,
   height_in REAL,
   depth_in REAL,
@@ -234,6 +235,7 @@ ensureColumn("prints", "printful_currency", "TEXT");
 ensureColumn("prints", "print_file_url", "TEXT");
 ensureColumn("prints", "fulfillment_type", "TEXT NOT NULL DEFAULT 'printful'");
 ensureColumn("prints", "stock_quantity", "INTEGER");
+ensureColumn("prints", "stock_reserved", "INTEGER NOT NULL DEFAULT 0");
 ensureColumn("prints", "width_in", "REAL");
 ensureColumn("prints", "height_in", "REAL");
 ensureColumn("prints", "depth_in", "REAL");
@@ -465,6 +467,7 @@ function mapPrint(row) {
     printfulOptions: (() => { try { return JSON.parse(row.printful_options || "[]"); } catch { return []; } })(),
     fulfillmentType: row.fulfillment_type || "printful",
     stockQuantity: row.stock_quantity === null || row.stock_quantity === undefined ? null : Number(row.stock_quantity),
+    stockReserved: Number(row.stock_reserved || 0),
     widthIn: row.width_in,
     heightIn: row.height_in,
     depthIn: row.depth_in,
@@ -561,6 +564,24 @@ function getSecondHighestBid(originalId) {
 
 function markOriginalStatus(originalId, status) {
   db.prepare(`UPDATE originals SET status=? WHERE id=?`).run(status, originalId);
+}
+
+function reserveOriginalCheckout(originalId) {
+  const result = db.prepare(`
+    UPDATE originals
+    SET status='payment_pending', updated_at=CURRENT_TIMESTAMP
+    WHERE id=? AND is_active=1 AND status='active'
+  `).run(originalId);
+  return result.changes === 1;
+}
+
+function releaseOriginalCheckout(originalId) {
+  const result = db.prepare(`
+    UPDATE originals
+    SET status='active', updated_at=CURRENT_TIMESTAMP
+    WHERE id=? AND is_active=1 AND status='payment_pending'
+  `).run(originalId);
+  return result.changes === 1;
 }
 
 function updateOriginalEndsAt(originalId, endsAt) {
@@ -715,6 +736,35 @@ function decrementPrintStock(id) {
     UPDATE prints
     SET stock_quantity = stock_quantity - 1, updated_at=CURRENT_TIMESTAMP
     WHERE id=? AND is_active=1 AND stock_quantity IS NOT NULL AND stock_quantity > 0
+  `).run(id);
+  return result.changes === 1;
+}
+
+function reservePrintStock(id) {
+  const result = db.prepare(`
+    UPDATE prints
+    SET stock_reserved = stock_reserved + 1, updated_at=CURRENT_TIMESTAMP
+    WHERE id=? AND is_active=1 AND stock_quantity IS NOT NULL AND stock_quantity > stock_reserved
+  `).run(id);
+  return result.changes === 1;
+}
+
+function finalizePrintStockReservation(id) {
+  const result = db.prepare(`
+    UPDATE prints
+    SET stock_quantity = stock_quantity - 1,
+        stock_reserved = stock_reserved - 1,
+        updated_at=CURRENT_TIMESTAMP
+    WHERE id=? AND is_active=1 AND stock_quantity IS NOT NULL AND stock_quantity > 0 AND stock_reserved > 0
+  `).run(id);
+  return result.changes === 1;
+}
+
+function releasePrintStockReservation(id) {
+  const result = db.prepare(`
+    UPDATE prints
+    SET stock_reserved = stock_reserved - 1, updated_at=CURRENT_TIMESTAMP
+    WHERE id=? AND is_active=1 AND stock_reserved > 0
   `).run(id);
   return result.changes === 1;
 }
@@ -1030,12 +1080,58 @@ function getPaymentByStripeSessionId(stripeSessionId) {
   `).get(stripeSessionId);
 }
 
+function getPaymentById(id) {
+  return db.prepare(`SELECT * FROM payments WHERE id=?`).get(id);
+}
+
+function setPaymentCheckoutSession(paymentId, stripeSessionId, checkoutUrl) {
+  db.prepare(`
+    UPDATE payments
+    SET stripe_session_id=?, checkout_url=?
+    WHERE id=?
+  `).run(stripeSessionId, checkoutUrl, paymentId);
+}
+
 function markPaymentPaid(stripeSessionId) {
   db.prepare(`
     UPDATE payments
     SET status='paid', paid_at=CURRENT_TIMESTAMP
     WHERE stripe_session_id=?
   `).run(stripeSessionId);
+}
+
+function markPaymentCancelled(stripeSessionId) {
+  db.prepare(`
+    UPDATE payments
+    SET status='cancelled'
+    WHERE stripe_session_id=? AND status='pending'
+  `).run(stripeSessionId);
+}
+
+function markPaymentFailed(stripeSessionId, failureReason = "") {
+  db.prepare(`
+    UPDATE payments
+    SET status='failed', failure_reason=?
+    WHERE stripe_session_id=?
+  `).run(failureReason, stripeSessionId);
+}
+
+function releaseStaleCheckoutReservations() {
+  const stalePayments = db.prepare(`
+    SELECT id, kind, original_id, print_id, stripe_session_id
+    FROM payments
+    WHERE status='pending' AND created_at < datetime('now', '-2 days')
+  `).all();
+
+  const release = db.transaction((payments) => {
+    for (const payment of payments) {
+      if (payment.kind === "print" && payment.print_id) releasePrintStockReservation(payment.print_id);
+      if (payment.kind === "original" && payment.original_id) releaseOriginalCheckout(payment.original_id);
+      markPaymentCancelled(payment.stripe_session_id);
+    }
+  });
+  release(stalePayments);
+  return stalePayments.length;
 }
 
 function setPaymentPrintfulOrderId(paymentId, printfulOrderId) {
@@ -1106,6 +1202,8 @@ module.exports = {
   getWinningBid,
   getSecondHighestBid,
   markOriginalStatus,
+  reserveOriginalCheckout,
+  releaseOriginalCheckout,
   updateOriginalEndsAt,
   createOriginalArtwork,
   updateOriginalArtwork,
@@ -1120,6 +1218,9 @@ module.exports = {
   getAllPrintsForAdmin,
   getPrintById,
   decrementPrintStock,
+  reservePrintStock,
+  finalizePrintStockReservation,
+  releasePrintStockReservation,
   upsertPrintfulPrint,
   upsertPrintfulPrints,
   archiveMissingPrintfulPrints,
@@ -1137,7 +1238,12 @@ module.exports = {
   updateAutoChargeAttempt,
   getAutoChargeAttempts,
   getPaymentByStripeSessionId,
+  getPaymentById,
+  setPaymentCheckoutSession,
   markPaymentPaid,
+  markPaymentCancelled,
+  markPaymentFailed,
+  releaseStaleCheckoutReservations,
   setPaymentPrintfulOrderId,
   markPaymentGoogleSheetsSynced,
   getPaymentByPrintfulOrderId,

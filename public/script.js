@@ -72,7 +72,7 @@ async function renderOriginals() {
     if (!originals.length) { grid.innerHTML = "<p>No original paintings are currently available.</p>"; return; }
 
     grid.innerHTML = originals.map((art) => {
-      const isAvailable = art.status !== "sold";
+      const isAvailable = art.status === "active";
       const shipping = art.shippingEstimate || { total: 0, packageType: "shipping estimate unavailable", breakdown: {} };
 
       return `
@@ -88,7 +88,7 @@ async function renderOriginals() {
             </section>
           </div>
           ${art.revealImageUrl ? `<button type="button" class="shine-button" data-id="${art.id}" aria-pressed="false">Shine a light</button>` : ""}
-          ${isAvailable ? `<button type="button" class="purchase-original" data-id="${art.id}">Purchase original</button>` : `<p class="notice">Sold</p>`}
+          ${isAvailable ? `<button type="button" class="purchase-original" data-id="${art.id}">Purchase original</button>` : `<p class="notice">${art.status === "sold" ? "Sold" : "Currently being purchased"}</p>`}
           <p class="notice" id="notice-${art.id}"></p>
         </article>`;
     }).join("");
@@ -170,8 +170,8 @@ function renderPrintGallery(artworks, grid) {
     return `
     <article class="product-card gallery-card">
       ${artworkImage(artwork)}
-      <div class="product-info"><div class="product-title-row"><h3>${artwork.title}</h3><span class="product-count">${productCount} product${productCount === 1 ? "" : "s"}</span></div></div>
-      <button type="button" class="view-products" data-artwork-key="${artwork.key}">View products</button>
+      <div class="product-info"><div class="product-title-row"><h3>${escapeHtml(artwork.title)}</h3><span class="product-count">${productCount} product${productCount === 1 ? "" : "s"}</span></div></div>
+      <button type="button" class="view-products" data-artwork-key="${escapeHtml(artwork.key)}">View products</button>
     </article>`;
   }).join("");
   attachArtworkPurchaseHandlers(artworks);
@@ -184,7 +184,7 @@ function productImageUrls(product) {
 function productPreviewMarkup(product) {
   const images = productImageUrls(product);
   if (!images.length) return `<div class="product-preview empty-preview">Product mockup unavailable</div>`;
-  return `<div class="product-preview"><img class="selected-product-image" src="${images[0]}" alt="${product.title}"><div class="product-thumbnails">${images.map((url, index) => `<button type="button" class="product-thumbnail ${index === 0 ? "active" : ""}" data-image="${url}" aria-label="View product image ${index + 1}"><img src="${url}" alt=""></button>`).join("")}</div></div>`;
+  return `<div class="product-preview"><img class="selected-product-image" src="${escapeHtml(images[0])}" alt="${escapeHtml(product.title)}"><div class="product-thumbnails">${images.map((url, index) => `<button type="button" class="product-thumbnail ${index === 0 ? "active" : ""}" data-image="${escapeHtml(url)}" aria-label="View product image ${index + 1}"><img src="${escapeHtml(url)}" alt=""></button>`).join("")}</div></div>`;
 }
 
 function attachArtworkPurchaseHandlers(artworks) {
@@ -198,7 +198,7 @@ function attachArtworkPurchaseHandlers(artworks) {
       const firstType = firstProduct.productType;
       const typeOptions = productTypes.map((product) => `<option value="${escapeHtml(product.productType)}">${escapeHtml(product.productType)}</option>`).join("");
       const typeProducts = (type) => artwork.products.filter((product) => product.productType === type);
-      const sizeButtons = (products, selectedId) => products.map((product) => { const stock = product.stockQuantity === null ? "" : product.stockQuantity > 0 ? ` · ${product.stockQuantity} available` : " · Sold out"; return `<button type="button" class="variant-button ${product.id === selectedId ? "active" : ""}" data-product-id="${product.id}" ${product.stockQuantity === 0 ? "disabled" : ""}>${escapeHtml(product.sizes || product.title)} · ${money(product.price)}${stock}</button>`; }).join("");
+      const sizeButtons = (products, selectedId) => products.map((product) => { const available = product.stockQuantity === null ? null : Math.max(Number(product.stockQuantity) - Number(product.stockReserved || 0), 0); const stock = available === null ? "" : available > 0 ? ` · ${available} available` : " · Sold out"; return `<button type="button" class="variant-button ${product.id === selectedId ? "active" : ""}" data-product-id="${escapeHtml(product.id)}" ${available === 0 ? "disabled" : ""}>${escapeHtml(product.sizes || product.title)} · ${money(product.price)}${stock}</button>`; }).join("");
       const optionSummary = (product) => (product.printfulOptions || []).map((option) => `<span class="product-option">${escapeHtml(option.id.replaceAll("_", " "))}: ${escapeHtml(option.value)}</span>`).join("");
       const content = dialog.querySelector("#printDialogContent");
       content.innerHTML = `<div class="dialog-heading"><p class="section-label">${artwork.products.length} options available</p><h2 id="printDialogTitle">${escapeHtml(artwork.title)}</h2><p>${escapeHtml(artwork.description || "Made-to-order products fulfilled through Printful.")}</p><label class="product-choice-label" for="productChoice">Choose a product type</label><select id="productChoice" class="product-choice">${typeOptions}</select><label class="product-choice-label">Choose a size</label><div class="variant-buttons" data-variant-buttons>${sizeButtons(typeProducts(firstType), firstProduct.id)}</div><div class="product-options" data-product-options>${optionSummary(firstProduct)}</div><p class="dialog-price selected-product-price">${money(firstProduct.price)} before shipping</p></div><form class="checkout-form" data-id="${firstProduct.id}"><input name="name" type="text" placeholder="Full name" required /><input name="email" type="email" placeholder="Email for receipt" required /><input name="address1" type="text" placeholder="Address" required /><input name="address2" type="text" placeholder="Apartment, suite, etc. (optional)" /><div class="form-grid compact-grid"><input name="city" type="text" placeholder="City" required /><select name="state" required>${US_STATE_OPTIONS}</select><input name="postalCode" type="text" placeholder="ZIP code" required /></div><input name="country" type="text" value="US" placeholder="Country" required /><button type="button" class="quote-shipping">Calculate shipping</button><button type="submit" disabled>Continue to Stripe</button></form><p class="notice" id="notice-${firstProduct.id}">Enter your mailing address to see live Printful shipping.</p>`;
