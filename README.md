@@ -16,7 +16,7 @@ This version changes the auction flow so bidders must register before bidding, s
 - The charge includes:
   - winning bid amount
   - estimated shipping/packaging charge
-- Receipt email is sent through Resend after successful automatic charge.
+- Stripe sends the customer receipt after a successful charge; Resend is reserved for shipment tracking.
 - Admin page shows bidders, shipping estimate, charge status, and a force-charge button for Stripe test mode.
 
 ## Run locally
@@ -43,10 +43,10 @@ ADMIN_SECRET=rayan-test-admin-12345
 
 STRIPE_SECRET_KEY=sk_test_your_key_here
 STRIPE_WEBHOOK_SECRET=whsec_your_webhook_secret_here
+STRIPE_PRINT_CLUB_PRICE_ID=price_your_monthly_9_usd_price
 
 RESEND_API_KEY=re_your_key_here
 FROM_EMAIL=Rayan Rao Art <onboarding@resend.dev>
-ARTIST_EMAIL=raorayan4@gmail.com
 
 PRINTFUL_API_KEY=your_printful_api_key
 PRINTFUL_WEBHOOK_SECRET=use_a_long_random_secret
@@ -83,8 +83,8 @@ For a Render deployment, add the Printful variables above. Set `PRINTFUL_WEBHOOK
 6. The server finds the highest bid.
 7. The server calculates shipping/packaging.
 8. The server creates and confirms a Stripe PaymentIntent using the saved payment method with `off_session: true`.
-9. If payment succeeds, the artwork becomes `sold` and the bidder receives a receipt email.
-10. If payment fails or requires authentication, the artwork becomes `auto_charge_failed` and emails are sent.
+9. If payment succeeds, the artwork becomes `sold` and Stripe sends the customer receipt.
+10. If payment fails or requires authentication, the artwork becomes `auto_charge_failed` for review.
 
 ## Shipping estimate logic
 
@@ -150,7 +150,7 @@ The admin page now includes direct auction controls:
 Use `End Bidding Now` when you want to manually close an auction before the timer. Use `Cancel Auction` if you want bidding to stop but do not want to sell the piece.
 
 
-## Shipping disclosure and Resend receipt emails
+## Stripe receipts and Resend shipment tracking
 
 This version makes shipping/packaging visible before a bidder places a bid.
 
@@ -168,7 +168,7 @@ When the auction is ended manually or automatically, the winner is charged:
 winning bid + displayed estimated shipping/packaging
 ```
 
-The buyer receipt email includes the winning bid, shipping/packaging estimate, total charged, package type, and a shipping-cost breakdown.
+Stripe sends the payment receipt directly to the email entered at checkout. Purchase webhooks record the paid order without sending a second Resend confirmation.
 
 ### Resend setup
 
@@ -177,7 +177,6 @@ Add your Resend key to `.env`:
 ```env
 RESEND_API_KEY=re_your_actual_key_here
 FROM_EMAIL=Rayan Rao Art <onboarding@resend.dev>
-ARTIST_EMAIL=raorayan4@gmail.com
 ```
 
 Then restart the server:
@@ -186,15 +185,13 @@ Then restart the server:
 npm run dev
 ```
 
-Open `http://localhost:3000/admin.html`, load the dashboard, and use **Email / Resend Test** before testing buyer receipts.
-
 For production, verify your own domain in Resend and change `FROM_EMAIL` to something like:
 
 ```env
 FROM_EMAIL=Rayan Rao Art <hello@yourdomain.com>
 ```
 
-If Resend fails after a successful Stripe charge, the charge is not undone. The server logs the email failure so you can resend/follow up manually.
+Resend is called only after Printful reports a tracked shipment. Stripe receipts do not use the Resend quota.
 
 
 ## Production-readiness iteration: real artwork workflow
@@ -245,13 +242,12 @@ These are placeholders for launch preparation, not attorney-reviewed legal docum
 - Admin, bidder registration, and bid routes now have basic rate limiting.
 - Draft originals are hidden from the public originals page.
 - Admin can create, edit, cancel, reopen, end, and archive draft originals.
-- Email test section is available in admin.
 
 ### Still required before a real public launch
 
 - Move from local SQLite to hosted Postgres.
 - Use a real admin login instead of one shared `ADMIN_SECRET`.
-- Use verified Resend domain email, not only `onboarding@resend.dev`.
+- Use a verified Resend domain for shipment tracking emails, not only `onboarding@resend.dev`.
 - Use production Stripe keys and production webhook endpoint.
 - Host images on Cloudinary/S3 or a similar service.
 - Review legal pages before launch.

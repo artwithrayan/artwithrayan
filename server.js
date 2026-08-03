@@ -238,28 +238,6 @@ async function processSingleAuctionAutoCharge(art, { force = false, selectedBid 
 
     if (paid) {
       db.markOriginalSold(art.id);
-
-      await email.sendAuctionAutoChargeReceiptEmail({
-        to: bidder.email,
-        bidderName: bidder.name,
-        original: art,
-        subtotalAmount,
-        shippingEstimate,
-        totalAmount,
-        paymentIntentId: paymentIntent.id
-      });
-
-      await email.sendArtistNotificationEmail({
-        subject: `Auction automatically charged: ${art.title}`,
-        body: `
-          <p><strong>${art.title}</strong> was automatically charged after auction close.</p>
-          <p>Buyer: ${bidder.name} (${bidder.email})</p>
-          <p>Winning bid: $${subtotalAmount}</p>
-          <p>Shipping/packaging: $${shippingAmount}</p>
-          <p>Total charged: $${totalAmount}</p>
-          <p>PaymentIntent: ${paymentIntent.id}</p>
-        `
-      });
     } else {
       db.markOriginalPaymentPending(art.id);
     }
@@ -294,22 +272,6 @@ async function processSingleAuctionAutoCharge(art, { force = false, selectedBid 
       shippingJson: shippingEstimate,
       status: error.code === "authentication_required" ? "requires_action" : "failed",
       failureReason: reason
-    });
-
-    await email.sendAuctionAutoChargeFailedEmail({
-      to: bidder.email,
-      bidderName: bidder.name,
-      original: art,
-      reason
-    });
-
-    await email.sendArtistNotificationEmail({
-      subject: `Auction charge failed: ${art.title}`,
-      body: `
-        <p><strong>${art.title}</strong> automatic charge failed.</p>
-        <p>Bidder: ${bidder.name} (${bidder.email})</p>
-        <p>Reason: ${reason}</p>
-      `
     });
 
     return { failed: true, reason, originalId: art.id };
@@ -392,16 +354,6 @@ app.post("/api/stripe/webhook", express.raw({ type: "application/json" }), async
             }
           });
 
-          await email.sendBidderApprovedEmail({ to: bidder.email, bidderName: bidder.name });
-          await email.sendArtistNotificationEmail({
-            subject: `New approved bidder: ${bidder.name}`,
-            body: `
-              <p><strong>${bidder.name}</strong> registered to bid and authorized automatic winner charging.</p>
-              <p>Email: ${bidder.email}</p>
-              <p>Phone: ${bidder.phone || "Not provided"}</p>
-              <p>Ship to: ${bidder.shippingLine1 || ""}, ${bidder.shippingCity || ""}, ${bidder.shippingState || ""} ${bidder.shippingPostalCode || ""}</p>
-            `
-          });
         }
       }
 
@@ -413,40 +365,18 @@ app.post("/api/stripe/webhook", express.raw({ type: "application/json" }), async
           const wasAlreadyPaid = payment.status === "paid";
           if (!wasAlreadyPaid) db.markPaymentPaid(session.id);
           if (payment.kind === "original") {
-            const original = db.getOriginalById(payment.original_id);
             db.markOriginalSold(payment.original_id);
-            await email.sendBuyerReceiptEmail({
-              to: payment.customer_email,
-              subject: `Payment received for ${original.title}`,
-              heading: "Payment received",
-              body: `Thank you for your payment for ${original.title}. Rayan will follow up with shipping details.`
-            });
           }
 
           if (payment.kind === "print") {
             const print = db.getPrintById(payment.print_id);
             console.log(`[print order] paid session=${session.id} print=${print?.title || payment.print_id}`);
             if (!wasAlreadyPaid) {
-              await email.sendBuyerReceiptEmail({
-                to: session.customer_details?.email || payment.customer_email,
-                subject: `Order received for ${print.title}`,
-                heading: "Order received",
-                body: `Thank you for ordering ${print.title}. Your order has been received.`
-              });
               if (print?.fulfillmentType === "self") {
                 const stockReserved = db.decrementPrintStock(print.id);
-                let shippingDetails = {};
-                try { shippingDetails = JSON.parse(payment.shipping_json || "{}").recipient || {}; } catch { shippingDetails = {}; }
-                const shippingAddress = [shippingDetails.address1, shippingDetails.address2, shippingDetails.city, shippingDetails.state_code, shippingDetails.zip].filter(Boolean).join(", ");
-                await email.sendArtistNotificationEmail({
-                  subject: `Self-fulfillment order: ${print.title}`,
-                  body: `<p><strong>Fulfillment:</strong> Self-fulfilled by Rayan</p><p><strong>Product:</strong> ${print.title}</p><p><strong>Customer:</strong> ${payment.customer_name} (${payment.customer_email})</p><p><strong>Amount paid:</strong> $${payment.total_amount}</p><p><strong>Stock reserved:</strong> ${stockReserved ? "Yes" : "No, stock was already depleted. Review this order immediately."}</p><p><strong>Shipping address:</strong> ${shippingAddress || "See Stripe payment details."}</p>`
-                });
+                if (!stockReserved) console.warn(`[self fulfillment] stock was already depleted for order ${payment.id}`);
               } else {
-                await email.sendArtistNotificationEmail({
-                  subject: `Printful order: ${print.title}`,
-                  body: `<p><strong>Fulfillment:</strong> Printful</p><p><strong>Product:</strong> ${print.title}</p><p><strong>Customer:</strong> ${payment.customer_name} (${payment.customer_email})</p><p><strong>Amount paid:</strong> $${payment.total_amount}</p>`
-                });
+                console.log(`[printful fulfillment] paid order ${payment.id} is ready for fulfillment`);
               }
             }
 
@@ -574,6 +504,7 @@ app.post("/api/originals/:id/checkout", async (req, res) => {
   const session = await stripe.checkout.sessions.create({
     mode: "payment",
     customer_email: recipient.email,
+    payment_intent_data: { receipt_email: recipient.email },
     line_items: [
       { price_data: { currency: "usd", unit_amount: Math.round(art.price * 100), product_data: { name: art.title, description: `${art.medium} · ${art.size}` } }, quantity: 1 },
       { price_data: { currency: "usd", unit_amount: Math.round(estimate.total * 100), product_data: { name: "Shipping", description: "Estimated shipping and packaging" } }, quantity: 1 }
@@ -585,6 +516,41 @@ app.post("/api/originals/:id/checkout", async (req, res) => {
   });
   db.createPayment({ kind: "original", originalId: art.id, stripeSessionId: session.id, checkoutUrl: session.url, customerName: recipient.name, customerEmail: recipient.email, subtotalAmount: art.price, shippingAmount: estimate.total, totalAmount, amount: totalAmount, shippingJson: { recipient, estimate }, status: "pending" });
   res.json({ checkoutUrl: session.url });
+});
+
+app.post("/api/print-club/checkout", async (req, res) => {
+  if (!requireStripe(res)) return;
+  const priceId = String(process.env.STRIPE_PRINT_CLUB_PRICE_ID || "").trim();
+  if (!priceId) {
+    return res.status(503).json({
+      error: "Print Club checkout is opening soon. Please check back shortly."
+    });
+  }
+
+  try {
+    const session = await stripe.checkout.sessions.create({
+      mode: "subscription",
+      line_items: [{ price: priceId, quantity: 1 }],
+      shipping_address_collection: { allowed_countries: ["US"] },
+      billing_address_collection: "auto",
+      allow_promotion_codes: true,
+      subscription_data: {
+        metadata: {
+          kind: "monthly_print_club",
+          cutoffDay: "20",
+          shipsByDay: "5"
+        }
+      },
+      metadata: { kind: "monthly_print_club" },
+      success_url: `${BASE_URL}/success.html?membership=print-club&session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${BASE_URL}/print-club.html`
+    });
+
+    res.json({ checkoutUrl: session.url });
+  } catch (error) {
+    console.error("[print club checkout]", error);
+    res.status(502).json({ error: "Could not open Print Club checkout. Please try again." });
+  }
 });
 
 app.post("/api/bidders/register", async (req, res) => {
@@ -788,6 +754,7 @@ app.post("/api/prints/:id/checkout", async (req, res) => {
     line_items: [{ price_data: { currency: "usd", unit_amount: Math.round(print.price * 100), product_data: { name: print.title, description: `${print.productType} · ${print.sizes}` } }, quantity: 1 }],
     shipping_address_collection: { allowed_countries: ["US"] },
     customer_email: customerEmail,
+    payment_intent_data: { receipt_email: customerEmail },
     metadata: { kind: "print", printId: print.id, fulfillmentType: print.fulfillmentType || "printful" },
     success_url: `${BASE_URL}/success.html?session_id={CHECKOUT_SESSION_ID}`,
     cancel_url: `${BASE_URL}/prints.html`
@@ -977,6 +944,7 @@ app.post("/api/admin/originals/:id/create-winner-checkout", requireAdmin, async 
   const session = await stripe.checkout.sessions.create({
     mode: "payment",
     customer_email: winningBid.bidder_email,
+    payment_intent_data: { receipt_email: winningBid.bidder_email },
     line_items: [{ price_data: { currency: "usd", unit_amount: Math.round(totalAmount * 100), product_data: { name: `Original painting: ${art.title}`, description: `${art.medium} · ${art.size} · Winning bid $${winningBid.amount} + shipping $${shippingEstimate.total}` } }, quantity: 1 }],
     metadata: { kind: "original", originalId: art.id, bidId: String(winningBid.id) },
     success_url: `${BASE_URL}/success.html?session_id={CHECKOUT_SESSION_ID}`,
@@ -986,7 +954,6 @@ app.post("/api/admin/originals/:id/create-winner-checkout", requireAdmin, async 
   const bidder = winningBid.bidder_id ? db.getBidderById(winningBid.bidder_id) : db.getBidderByEmail(winningBid.bidder_email);
   const payment = db.createPayment({ kind: "original", originalId: art.id, bidId: winningBid.id, bidderId: bidder?.id || null, stripeSessionId: session.id, checkoutUrl: session.url, customerName: winningBid.bidder_name, customerEmail: winningBid.bidder_email, subtotalAmount: winningBid.amount, shippingAmount: shippingEstimate.total, totalAmount, amount: totalAmount, shippingJson: shippingEstimate, status: "pending" });
   db.markOriginalPaymentPending(art.id);
-  await email.sendWinnerPaymentEmail({ to: winningBid.bidder_email, bidderName: winningBid.bidder_name, original: art, subtotalAmount: winningBid.amount, shippingEstimate, amount: totalAmount, checkoutUrl: session.url });
   res.status(201).json({ message: "Winner checkout link created.", checkoutUrl: session.url, payment });
 });
 
@@ -994,32 +961,6 @@ app.get("/api/admin/bidders", requireAdmin, (req, res) => res.json({ bidders: db
 app.post("/api/admin/bidders/:id/approve", requireAdmin, (req, res) => res.json({ bidder: db.setBidderApproval(req.params.id, true) }));
 app.post("/api/admin/bidders/:id/block", requireAdmin, (req, res) => res.json({ bidder: db.setBidderBlocked(req.params.id, true) }));
 app.post("/api/admin/bidders/:id/unblock", requireAdmin, (req, res) => res.json({ bidder: db.setBidderBlocked(req.params.id, false) }));
-
-app.post("/api/admin/email/test", requireAdmin, async (req, res) => {
-  const to = String(req.body.to || process.env.ARTIST_EMAIL || "").trim();
-  if (!validator.isEmail(to)) {
-    return res.status(400).json({ error: "Enter a valid email address to send the test email." });
-  }
-
-  const result = await email.sendEmail({
-    to,
-    subject: "Rayan Rao Art email test",
-    html: `
-      <div style="font-family:Arial,sans-serif;line-height:1.5;color:#111;">
-        <h1 style="font-weight:500;">Email test successful</h1>
-        <p>If you received this, Resend is configured correctly for your art site.</p>
-        <p>From: ${process.env.FROM_EMAIL || "Rayan Rao Art <onboarding@resend.dev>"}</p>
-      </div>
-    `
-  });
-
-  if (result.failed) {
-    return res.status(500).json({ error: result.reason || "Resend failed to send the test email.", result });
-  }
-
-  res.json({ message: "Test email attempted.", result });
-});
-
 
 app.get("/api/admin/prints", requireAdmin, (req, res) => res.json({ prints: db.getAllPrintsForAdmin() }));
 app.post("/api/admin/printful/sync-products", requireAdmin, async (req, res) => {

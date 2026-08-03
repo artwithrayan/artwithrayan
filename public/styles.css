@@ -168,6 +168,61 @@ select:focus { outline: 1px solid var(--ink); }
 .art-image img, .product-preview img, .portrait-placeholder img, .banner-image { user-select: none; -webkit-user-drag: none; }
 .about-copy p { font-size: 18px; line-height: 1.65; white-space: pre-line; }
 
+/* Monthly Print Club */
+.club-page { overflow: hidden; }
+.club-hero { display: grid; grid-template-columns: minmax(0, .95fr) minmax(360px, 1.05fr); min-height: calc(100vh - 64px); border-bottom: 1px solid var(--line); }
+.club-hero-copy { padding: clamp(48px, 8vw, 112px) 6vw 48px 28px; display: flex; flex-direction: column; align-items: flex-start; justify-content: center; }
+.club-hero h1 { margin: 0; font-size: clamp(62px, 10vw, 144px); line-height: .78; letter-spacing: -.075em; font-weight: 500; }
+.club-lede { max-width: 520px; margin: 34px 0 0; color: var(--muted); font-size: 17px; line-height: 1.6; }
+.club-price { display: flex; align-items: center; gap: 16px; margin: 34px 0 22px; }
+.club-price strong { font-size: 48px; line-height: 1; font-weight: 500; letter-spacing: -.05em; }
+.club-price span { color: var(--muted); font-size: 12px; line-height: 1.4; text-transform: uppercase; letter-spacing: .06em; }
+.club-join { min-width: 220px; padding: 15px 18px; }
+.club-visual { min-height: 620px; position: relative; background: #e9e7e1; overflow: hidden; }
+.club-visual img { width: 100%; height: 100%; max-width: none; position: absolute; inset: 0; object-fit: cover; }
+.club-visual span { position: absolute; right: 18px; bottom: 18px; padding: 9px 11px; background: rgba(255,255,255,.92); font-size: 10px; letter-spacing: .08em; text-transform: uppercase; }
+.club-included, .club-faq { display: grid; grid-template-columns: minmax(260px, .8fr) minmax(0, 1.2fr); gap: 8vw; padding: 72px 28px; border-bottom: 1px solid var(--line); }
+.club-included h2, .club-faq h2, .club-final-cta h2 { margin: 0; font-size: clamp(42px, 7vw, 88px); line-height: .88; letter-spacing: -.06em; font-weight: 500; }
+.club-feature-list { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--ink); }
+.club-feature-list li { display: grid; grid-template-columns: 48px 1fr; gap: 20px; padding: 20px 0; border-bottom: 1px solid var(--line); }
+.club-feature-list li > span { color: var(--muted); font-size: 11px; }
+.club-feature-list strong { font-size: 18px; font-weight: 500; }
+.club-feature-list p, .club-calendar p, .club-faq p { margin: 7px 0 0; color: var(--muted); line-height: 1.55; }
+.club-calendar { padding: 72px 28px; border-bottom: 1px solid var(--line); }
+.club-calendar-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); margin-top: 34px; border-top: 1px solid var(--ink); border-bottom: 1px solid var(--ink); }
+.club-calendar-grid article { min-height: 220px; padding: 18px; border-right: 1px solid var(--line); }
+.club-calendar-grid article:last-child { border-right: 0; }
+.club-calendar-grid span { color: var(--muted); font-size: 10px; letter-spacing: .08em; text-transform: uppercase; }
+.club-calendar-grid h3 { margin: 52px 0 0; font-size: 25px; font-weight: 500; letter-spacing: -.03em; }
+.club-faq-list { border-top: 1px solid var(--ink); }
+.club-faq-list details { border-bottom: 1px solid var(--line); padding: 18px 0; }
+.club-faq-list summary { cursor: pointer; font-size: 16px; }
+.club-faq-list p { max-width: 650px; }
+.club-final-cta { padding: 100px 28px; text-align: center; }
+.club-final-cta h2 { margin-bottom: 32px; }
+@media(max-width:900px) {
+  .club-hero { grid-template-columns: 1fr; }
+  .club-visual { min-height: 70vh; order: -1; }
+  .club-hero-copy { padding: 48px 28px 64px; }
+  .club-calendar-grid { grid-template-columns: 1fr 1fr; }
+  .club-calendar-grid article:nth-child(2) { border-right: 0; }
+  .club-calendar-grid article:nth-child(-n+2) { border-bottom: 1px solid var(--line); }
+}
+@media(max-width:680px) {
+  .club-visual { min-height: 56vh; }
+  .club-hero-copy, .club-included, .club-calendar, .club-faq, .club-final-cta { padding-left: 16px; padding-right: 16px; }
+  .club-included, .club-faq { grid-template-columns: 1fr; gap: 38px; padding-top: 52px; padding-bottom: 52px; }
+  .club-calendar-grid { grid-template-columns: 1fr; }
+  .club-calendar-grid article { min-height: 180px; border-right: 0; border-bottom: 1px solid var(--line); }
+  .club-calendar-grid article:last-child { border-bottom: 0; }
+  .club-calendar-grid h3 { margin-top: 34px; }
+  .club-final-cta { padding-top: 72px; padding-bottom: 72px; }
+}
+
+/* Three primary destinations on the homepage. */
+.split-links { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+@media(max-width:680px) { .split-links { grid-template-columns: 1fr; } }
+
 /* Make the About section full-bleed with a taller, unframed artist image. */
 .about-section { grid-template-columns: minmax(320px, 44vw) minmax(0, 1fr); gap: clamp(28px, 5vw, 72px); padding: 56px 0; width: 100%; align-items: stretch; }
 .portrait-placeholder { aspect-ratio: 3 / 4; max-width: none; border: 0; background: transparent; }

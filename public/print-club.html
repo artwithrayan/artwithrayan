@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Monthly Print Club | RAYAN RAO</title>
+  <meta name="description" content="Join the Rayan Rao Monthly Print Club for a signed 5 × 7 art print delivered by mail each month.">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="site-header">
+    <a class="logo" href="index.html">RAYAN RAO</a>
+    <nav class="nav">
+      <a href="index.html">Home</a>
+      <a href="originals.html">Originals</a>
+      <a href="prints.html">Prints</a>
+      <a href="print-club.html" class="active">Print Club</a>
+    </nav>
+  </header>
+
+  <main class="club-page">
+    <section class="club-hero">
+      <div class="club-hero-copy">
+        <p class="section-label">A small piece of art, every month</p>
+        <h1>Monthly<br>Print Club</h1>
+        <p class="club-lede">Build a collection one envelope at a time. Members receive a signed mini print created from Rayan's work and mailed directly from the studio.</p>
+        <div class="club-price"><strong>$9</strong><span>per month<br>US postage included</span></div>
+        <button class="club-join" id="joinPrintClub" type="button">Join the club</button>
+        <p class="notice" id="clubCheckoutNotice" aria-live="polite">Renews monthly. Cancel anytime through Stripe.</p>
+      </div>
+      <div class="club-visual" aria-label="Featured Rayan Rao artwork">
+        <img src="images/flower.jpg" alt="Colorful flower artwork by Rayan Rao">
+        <span>01 / A new edition each month</span>
+      </div>
+    </section>
+
+    <section class="club-included">
+      <div>
+        <p class="section-label">Inside the envelope</p>
+        <h2>Made to collect.</h2>
+      </div>
+      <ol class="club-feature-list">
+        <li><span>01</span><div><strong>Signed 5 × 7 print</strong><p>A new small-format reproduction selected for club members each month.</p></div></li>
+        <li><span>02</span><div><strong>Studio note</strong><p>A short note about the work, its inspiration, or what was happening in the studio.</p></div></li>
+        <li><span>03</span><div><strong>Stamped art mail</strong><p>Packed flat and sent by traditional USPS letter mail. No tracking is provided.</p></div></li>
+      </ol>
+    </section>
+
+    <section class="club-calendar">
+      <p class="section-label">How membership works</p>
+      <div class="club-calendar-grid">
+        <article><span>By the 20th</span><h3>Join</h3><p>Subscribe by the 20th to be included in the following month's edition.</p></article>
+        <article><span>After the 20th</span><h3>Next cycle</h3><p>Subscriptions placed later begin with the edition after next.</p></article>
+        <article><span>By the 5th</span><h3>Mail day</h3><p>The month's envelopes leave the studio during the first week of the month.</p></article>
+        <article><span>Mid-month</span><h3>Collect</h3><p>Most domestic envelopes arrive around the middle of the month.</p></article>
+      </div>
+    </section>
+
+    <section class="club-faq">
+      <div>
+        <p class="section-label">Details</p>
+        <h2>Good to know</h2>
+      </div>
+      <div class="club-faq-list">
+        <details open><summary>Is shipping included?</summary><p>Yes. Standard US letter postage is included in the $9 monthly price.</p></details>
+        <details><summary>Can I track my envelope?</summary><p>No. Club editions are sent with traditional postage stamps to keep membership affordable.</p></details>
+        <details><summary>When does my first print arrive?</summary><p>Join by the 20th to receive the next month's edition. Join after the 20th and your first edition begins the following cycle.</p></details>
+        <details><summary>Can I cancel?</summary><p>Yes. Membership renews monthly and can be canceled through Stripe's secure customer portal.</p></details>
+      </div>
+    </section>
+
+    <section class="club-final-cta">
+      <p class="section-label">Your next favorite piece may arrive by mail</p>
+      <h2>Join the collection.</h2>
+      <button class="club-join" id="joinPrintClubBottom" type="button">Join for $9 a month</button>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <p>&copy; <span id="year"></span> Rayan Rao</p>
+    <p><a href="terms.html">Terms</a> · <a href="privacy.html">Privacy</a> · <a href="shipping-policy.html">Shipping</a> · <a href="refunds-returns.html">Refunds and Returns</a></p>
+  </footer>
+  <script src="print-club.js"></script>
+</body>
+</html>
