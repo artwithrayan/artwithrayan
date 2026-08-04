@@ -547,14 +547,16 @@ app.get("/api/health", (req, res) => res.json({
 app.get("/api/site-content", (req, res) => res.json({ content: db.getSiteContent() }));
 
 app.get("/api/originals", (req, res) => {
-  const originals = db.getOriginals().map((art) => ({ ...art, price: art.status === "active" ? prettyStripeAdjustedPrice(art.price) : art.price, currentBid: db.getCurrentBid(art.id) }));
+  db.releaseStaleCheckoutReservations();
+  const originals = db.getOriginals().map((art) => ({ ...art, price: ["active", "payment_pending"].includes(art.status) ? prettyStripeAdjustedPrice(art.price) : art.price, currentBid: db.getCurrentBid(art.id) }));
   res.json({ originals });
 });
 
 app.get("/api/originals/:id", (req, res) => {
+  db.releaseStaleCheckoutReservations();
   const art = db.getOriginalById(req.params.id);
   if (!art) return res.status(404).json({ error: "Original artwork not found." });
-  res.json({ original: { ...art, price: art.status === "active" ? prettyStripeAdjustedPrice(art.price) : art.price } });
+  res.json({ original: { ...art, price: ["active", "payment_pending"].includes(art.status) ? prettyStripeAdjustedPrice(art.price) : art.price } });
 });
 
 app.post("/api/originals/:id/shipping-rate", quoteRateLimit, (req, res) => {
@@ -594,6 +596,7 @@ app.post("/api/originals/:id/checkout", checkoutRateLimit, async (req, res) => {
         { price_data: { currency: "usd", unit_amount: Math.round(estimate.total * 100), product_data: { name: "Shipping", description: "Estimated shipping and packaging" } }, quantity: 1 }
       ],
       metadata: { kind: "original", originalId: art.id, localPaymentId: String(payment.id) },
+      expires_at: Math.floor(Date.now() / 1000) + 30 * 60,
       success_url: `${BASE_URL}/success.html?session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${BASE_URL}/originals.html`
     });
@@ -764,6 +767,7 @@ app.get("/api/originals/:id/bids", (req, res) => {
 });
 
 app.get("/api/prints", (req, res) => {
+  db.releaseStaleCheckoutReservations();
   const groups = new Map();
   db.getPrints().forEach((print) => {
     const key = print.artworkKey || print.id;
@@ -853,6 +857,7 @@ app.post("/api/prints/:id/checkout", checkoutRateLimit, async (req, res) => {
     customer_email: customerEmail,
     payment_intent_data: { receipt_email: customerEmail },
     metadata: { kind: "print", printId: print.id, fulfillmentType: print.fulfillmentType || "printful" },
+    expires_at: Math.floor(Date.now() / 1000) + 30 * 60,
     success_url: `${BASE_URL}/success.html?session_id={CHECKOUT_SESSION_ID}`,
     cancel_url: `${BASE_URL}/prints.html`
   };

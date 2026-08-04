@@ -1120,7 +1120,7 @@ function releaseStaleCheckoutReservations() {
   const stalePayments = db.prepare(`
     SELECT id, kind, original_id, print_id, stripe_session_id
     FROM payments
-    WHERE status='pending' AND created_at < datetime('now', '-2 days')
+    WHERE status='pending' AND created_at < datetime('now', '-30 minutes')
   `).all();
 
   const release = db.transaction((payments) => {
