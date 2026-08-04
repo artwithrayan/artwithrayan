@@ -247,17 +247,18 @@ async function createDraftOrderFromStripeSession({ payment, print, stripeSession
 
   let shippingJson = {};
   try { shippingJson = payment.shipping_json ? JSON.parse(payment.shipping_json) : {}; } catch { shippingJson = {}; }
+  const externalId = `rayan-payment-${payment.id}`;
 
   if (print.printfulSyncVariantId) {
     const item = { sync_variant_id: Number(print.printfulSyncVariantId), quantity: 1 };
     if (Array.isArray(print.printfulOptions) && print.printfulOptions.length) item.options = print.printfulOptions;
-    const payload = { external_id: `stripe-${payment.stripe_session_id}`, shipping: shippingJson.method || undefined, recipient, items: [item] };
+    const payload = { external_id: externalId, shipping: shippingJson.method || undefined, recipient, items: [item] };
     const data = await printfulFetch("/orders?confirm=false", { method: "POST", body: JSON.stringify(payload) });
     return { printfulOrderId: data?.result?.id || data?.id || data?.data?.id, data };
   }
 
   if (print.printfulVariantId && print.printFileUrl) {
-    const payload = { external_id: `stripe-${payment.stripe_session_id}`, shipping: shippingJson.method || undefined, recipient, items: [{ variant_id: Number(print.printfulVariantId), quantity: 1, files: [{ url: print.printFileUrl }] }] };
+    const payload = { external_id: externalId, shipping: shippingJson.method || undefined, recipient, items: [{ variant_id: Number(print.printfulVariantId), quantity: 1, files: [{ url: print.printFileUrl }] }] };
     const data = await printfulFetch("/orders?confirm=false", { method: "POST", body: JSON.stringify(payload) });
     return { printfulOrderId: data?.result?.id || data?.id || data?.data?.id, data };
   }
