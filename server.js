@@ -433,9 +433,14 @@ app.post("/api/stripe/webhook", express.raw({ type: "application/json" }), async
             }
 
             if (print?.fulfillmentType !== "self") {
-              const printfulResult = await printful.createDraftOrderFromStripeSession({ payment, print, stripeSession: session });
-              if (printfulResult?.printfulOrderId) db.setPaymentPrintfulOrderId(payment.id, String(printfulResult.printfulOrderId));
-              console.log(`[print order] Printful result: ${printfulResult?.printfulOrderId ? `draft ${printfulResult.printfulOrderId}` : printfulResult?.reason || "no draft id returned"}`);
+              try {
+                const printfulResult = await printful.createDraftOrderFromStripeSession({ payment, print, stripeSession: session });
+                if (printfulResult?.printfulOrderId) db.setPaymentPrintfulOrderId(payment.id, String(printfulResult.printfulOrderId));
+                console.log(`[print order] Printful result: ${printfulResult?.printfulOrderId ? `draft ${printfulResult.printfulOrderId}` : printfulResult?.reason || "no draft id returned"}`);
+              } catch (error) {
+                console.error(`[print order] Printful draft failed for payment ${payment.id}:`, error.message || error);
+                console.warn(`[print order] Recording payment ${payment.id} in Google Sheets despite the Printful failure.`);
+              }
             }
           }
 
