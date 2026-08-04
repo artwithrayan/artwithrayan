@@ -75,6 +75,23 @@ async function ensureHeaders() {
   });
 }
 
+function rowRange(config, rowNumber) {
+  const [sheetName, columns = "A:AC"] = config.range.split("!");
+  const [firstColumn = "A", lastColumn = "AC"] = columns.split(":");
+  return `${sheetName}!${firstColumn}${rowNumber}:${lastColumn}${rowNumber}`;
+}
+
+async function upsertExistingOrderRow(config, orderId, row) {
+  const existing = await sheetsRequest(`/values/${encodeURIComponent(config.range)}`);
+  const rowIndex = (existing.values || []).findIndex((values) => String(values?.[0] || "") === String(orderId));
+  if (rowIndex < 0) return false;
+  await sheetsRequest(`/values/${encodeURIComponent(rowRange(config, rowIndex + 1))}?valueInputOption=USER_ENTERED`, {
+    method: "PUT",
+    body: JSON.stringify({ majorDimension: "ROWS", values: [row] })
+  });
+  return true;
+}
+
 function money(value) {
   return Number.isFinite(Number(value)) ? Number(value).toFixed(2) : "";
 }
@@ -104,7 +121,7 @@ function printOptions(print) {
 }
 
 async function appendPaidOrder({ payment, print, original }) {
-  if (!isConfigured() || payment.google_sheets_synced_at) return false;
+  if (!isConfigured()) return false;
   const config = getConfig();
   await ensureHeaders();
   const total = Number(payment.total_amount || payment.amount || 0);
@@ -142,6 +159,10 @@ async function appendPaidOrder({ payment, print, original }) {
     payment.printful_order_id || "",
     address, city, state, zip, country
   ];
+  if (payment.google_sheets_synced_at) {
+    if (!payment.printful_order_id) return false;
+    return upsertExistingOrderRow(config, payment.id, row);
+  }
   await sheetsRequest(`/values/${encodeURIComponent(config.range)}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`, {
     method: "POST",
     body: JSON.stringify({ majorDimension: "ROWS", values: [row] })
