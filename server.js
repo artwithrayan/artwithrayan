@@ -20,6 +20,26 @@ const PORT = process.env.PORT || 3000;
 const BASE_URL = process.env.BASE_URL || `http://localhost:${PORT}`;
 const stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SECRET_KEY) : null;
 const AUTO_CHARGE_AUCTIONS = false;
+const STRIPE_CARD_PERCENT = 0.029;
+const STRIPE_CARD_FIXED_CENTS = 30;
+
+function grossUpStripeCardFee(amount) {
+  const baseCents = Math.max(0, Math.round(Number(amount || 0) * 100));
+  const grossCents = Math.ceil((baseCents + STRIPE_CARD_FIXED_CENTS) / (1 - STRIPE_CARD_PERCENT));
+  return {
+    baseCents,
+    grossCents,
+    adjustmentCents: grossCents - baseCents,
+    baseAmount: baseCents / 100,
+    grossAmount: grossCents / 100,
+    adjustmentAmount: (grossCents - baseCents) / 100
+  };
+}
+
+function prettyStripeAdjustedPrice(amount) {
+  const grossCents = grossUpStripeCardFee(amount).grossCents;
+  return Math.ceil(grossCents / 100);
+}
 
 app.set("trust proxy", 1);
 
@@ -527,14 +547,14 @@ app.get("/api/health", (req, res) => res.json({
 app.get("/api/site-content", (req, res) => res.json({ content: db.getSiteContent() }));
 
 app.get("/api/originals", (req, res) => {
-  const originals = db.getOriginals().map((art) => ({ ...art, currentBid: db.getCurrentBid(art.id) }));
+  const originals = db.getOriginals().map((art) => ({ ...art, price: art.status === "active" ? prettyStripeAdjustedPrice(art.price) : art.price, currentBid: db.getCurrentBid(art.id) }));
   res.json({ originals });
 });
 
 app.get("/api/originals/:id", (req, res) => {
   const art = db.getOriginalById(req.params.id);
   if (!art) return res.status(404).json({ error: "Original artwork not found." });
-  res.json({ original: art });
+  res.json({ original: { ...art, price: art.status === "active" ? prettyStripeAdjustedPrice(art.price) : art.price } });
 });
 
 app.post("/api/originals/:id/shipping-rate", quoteRateLimit, (req, res) => {
@@ -544,7 +564,8 @@ app.post("/api/originals/:id/shipping-rate", quoteRateLimit, (req, res) => {
   const validationError = validatePrintShippingRecipient(recipient);
   if (validationError) return res.status(400).json({ error: validationError });
   const estimate = estimateOriginalShipping({ ...art, destinationState: recipient.state_code });
-  res.json({ shipping: estimate.total, product: art.price, total: art.price + estimate.total, currency: "USD", name: "Estimated shipping", estimate });
+  const customerPrice = prettyStripeAdjustedPrice(art.price);
+  res.json({ shipping: estimate.total, product: customerPrice, total: customerPrice + estimate.total, currency: "USD", name: "Estimated shipping", estimate });
 });
 
 app.post("/api/originals/:id/checkout", checkoutRateLimit, async (req, res) => {
@@ -557,18 +578,19 @@ app.post("/api/originals/:id/checkout", checkoutRateLimit, async (req, res) => {
   const validationError = validatePrintShippingRecipient(recipient);
   if (validationError) return res.status(400).json({ error: validationError });
   const estimate = estimateOriginalShipping({ ...art, destinationState: recipient.state_code });
-  const totalAmount = Math.round(Number(art.price) + Number(estimate.total));
+  const customerPrice = prettyStripeAdjustedPrice(art.price);
+  const totalAmount = customerPrice + estimate.total;
   if (!db.reserveOriginalCheckout(art.id)) return res.status(409).json({ error: "This original is currently unavailable or already being purchased." });
 
   let payment = null;
   try {
-    payment = db.createPayment({ kind: "original", originalId: art.id, stripeSessionId: `pending-${crypto.randomUUID()}`, checkoutUrl: "pending", customerName: recipient.name, customerEmail: recipient.email, subtotalAmount: art.price, shippingAmount: estimate.total, totalAmount, amount: totalAmount, shippingJson: { recipient, estimate }, status: "pending" });
+    payment = db.createPayment({ kind: "original", originalId: art.id, stripeSessionId: `pending-${crypto.randomUUID()}`, checkoutUrl: "pending", customerName: recipient.name, customerEmail: recipient.email, subtotalAmount: customerPrice, shippingAmount: estimate.total, totalAmount, amount: totalAmount, shippingJson: { recipient, estimate }, status: "pending" });
     const session = await stripe.checkout.sessions.create({
       mode: "payment",
       customer_email: recipient.email,
       payment_intent_data: { receipt_email: recipient.email },
       line_items: [
-        { price_data: { currency: "usd", unit_amount: Math.round(art.price * 100), product_data: { name: art.title, description: `${art.medium} · ${art.size}` } }, quantity: 1 },
+        { price_data: { currency: "usd", unit_amount: Math.round(customerPrice * 100), product_data: { name: art.title, description: `${art.medium} · ${art.size}` } }, quantity: 1 },
         { price_data: { currency: "usd", unit_amount: Math.round(estimate.total * 100), product_data: { name: "Shipping", description: "Estimated shipping and packaging" } }, quantity: 1 }
       ],
       metadata: { kind: "original", originalId: art.id, localPaymentId: String(payment.id) },
@@ -746,7 +768,7 @@ app.get("/api/prints", (req, res) => {
   db.getPrints().forEach((print) => {
     const key = print.artworkKey || print.id;
     if (!groups.has(key)) groups.set(key, { key, title: print.artworkKey || print.title, imageUrl: print.imageUrl, colorOne: print.colorOne, colorTwo: print.colorTwo, description: print.description, products: [] });
-    groups.get(key).products.push(print);
+    groups.get(key).products.push({ ...print, price: prettyStripeAdjustedPrice(print.price) });
   });
   res.json({ artworks: [...groups.values()] });
 });
@@ -802,7 +824,8 @@ app.post("/api/prints/:id/shipping-rate", quoteRateLimit, async (req, res) => {
     const print = db.getPrintById(req.params.id);
     if (!print) return res.status(404).json({ error: "Print product not found." });
     const quote = await getPrintShippingQuote(print, req.body);
-    res.json({ shipping: quote.shippingAmount, fulfillmentTax: quote.fulfillmentTax, product: print.price, total: Math.round((print.price + quote.shippingAmount + quote.fulfillmentTax) * 100) / 100, currency: quote.rate.currency, method: quote.rate.id, name: quote.rate.name, delivery: { min: quote.rate.minDeliveryDays, max: quote.rate.maxDeliveryDays }, estimate: quote.selfEstimate || null });
+    const customerPrice = prettyStripeAdjustedPrice(print.price);
+    res.json({ shipping: quote.shippingAmount, fulfillmentTax: quote.fulfillmentTax, product: customerPrice, total: customerPrice + quote.shippingAmount + quote.fulfillmentTax, currency: quote.rate.currency, method: quote.rate.id, name: quote.rate.name, delivery: { min: quote.rate.minDeliveryDays, max: quote.rate.maxDeliveryDays }, estimate: quote.selfEstimate || null });
   } catch (error) { res.status(error.statusCode || 502).json({ error: error.message || "Could not calculate shipping." }); }
 });
 
@@ -816,6 +839,7 @@ app.post("/api/prints/:id/checkout", checkoutRateLimit, async (req, res) => {
   try { quote = await getPrintShippingQuote(print, req.body); }
   catch (error) { return res.status(error.statusCode || 502).json({ error: error.message || "Could not calculate shipping." }); }
   const { recipient, rate, shippingAmount, fulfillmentTax } = quote;
+  const customerPrice = prettyStripeAdjustedPrice(print.price);
   const customerEmail = recipient.email;
   const shippingCents = Math.round(shippingAmount * 100);
   const shouldReserveStock = print.fulfillmentType === "self" && print.stockQuantity !== null;
@@ -825,7 +849,7 @@ app.post("/api/prints/:id/checkout", checkoutRateLimit, async (req, res) => {
   let payment = null;
   const sessionConfig = {
     mode: "payment",
-    line_items: [{ price_data: { currency: "usd", unit_amount: Math.round(print.price * 100), product_data: { name: print.title, description: `${print.productType} · ${print.sizes}` } }, quantity: 1 }],
+    line_items: [{ price_data: { currency: "usd", unit_amount: Math.round(customerPrice * 100), product_data: { name: print.title, description: `${print.productType} · ${print.sizes}` } }, quantity: 1 }],
     customer_email: customerEmail,
     payment_intent_data: { receipt_email: customerEmail },
     metadata: { kind: "print", printId: print.id, fulfillmentType: print.fulfillmentType || "printful" },
@@ -835,7 +859,7 @@ app.post("/api/prints/:id/checkout", checkoutRateLimit, async (req, res) => {
   sessionConfig.line_items.push({ price_data: { currency: "usd", unit_amount: shippingCents, product_data: { name: "Shipping", description: rate.name || "Shipping" } }, quantity: 1 });
   if (fulfillmentTax > 0) sessionConfig.line_items.push({ price_data: { currency: "usd", unit_amount: Math.round(fulfillmentTax * 100), product_data: { name: "Printful fulfillment tax", description: "Estimated Printful fulfillment tax" } }, quantity: 1 });
   try {
-    payment = db.createPayment({ kind: "print", printId: print.id, stripeSessionId: `pending-${crypto.randomUUID()}`, checkoutUrl: "pending", customerName: recipient.name, customerEmail, subtotalAmount: print.price, shippingAmount, totalAmount: print.price + shippingAmount + fulfillmentTax, amount: print.price + shippingAmount + fulfillmentTax, shippingJson: { recipient, method: rate.id, name: rate.name, rate: shippingAmount, fulfillmentTax, fulfillmentCosts: quote.fulfillmentCosts || null, currency: rate.currency, estimate: quote.selfEstimate || null }, status: "pending" });
+    payment = db.createPayment({ kind: "print", printId: print.id, stripeSessionId: `pending-${crypto.randomUUID()}`, checkoutUrl: "pending", customerName: recipient.name, customerEmail, subtotalAmount: customerPrice, shippingAmount, totalAmount: customerPrice + shippingAmount + fulfillmentTax, amount: customerPrice + shippingAmount + fulfillmentTax, shippingJson: { recipient, method: rate.id, name: rate.name, rate: shippingAmount, fulfillmentTax, fulfillmentCosts: quote.fulfillmentCosts || null, currency: rate.currency, estimate: quote.selfEstimate || null }, status: "pending" });
     sessionConfig.metadata.localPaymentId = String(payment.id);
     const session = await stripe.checkout.sessions.create(sessionConfig);
     db.setPaymentCheckoutSession(payment.id, session.id, session.url);
