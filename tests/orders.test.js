@@ -134,6 +134,38 @@ test("unsigned Stripe and unauthorized Printful webhooks remain rejected", async
   assert.equal((await fetch(`${base}/api/printful/webhook`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })).status, 401);
 });
 
+test("original listings use base prices and provide the inquiry address", async () => {
+  const catalog = await (await fetch(`${base}/api/originals`)).json();
+  assert.equal(catalog.inquiryEmail, "artwithrayan@gmail.com");
+  for (const art of catalog.originals) {
+    assert.equal(art.price, f.db.getOriginalById(art.id).price);
+  }
+  const detail = await (await fetch(`${base}/api/originals/the-light`)).json();
+  assert.equal(detail.original.price, f.db.getOriginalById("the-light").price);
+  assert.equal(detail.inquiryEmail, catalog.inquiryEmail);
+});
+
+test("original checkout and shipping endpoints cannot create orders or reservations", async () => {
+  const paymentsBefore = f.sql.prepare("SELECT COUNT(*) AS count FROM payments").get().count;
+  const artBefore = f.db.getOriginalById("the-light");
+  const checkoutsBefore = f.calls.checkouts;
+  for (const id of ["the-light", "unknown-original"]) {
+    for (const endpoint of ["checkout", "shipping-rate"]) {
+      const response = await fetch(`${base}/api/originals/${id}/${endpoint}`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: "{}"
+      });
+      assert.equal(response.status, 410);
+      const result = await response.json();
+      assert.match(result.error, /email inquiry only/);
+      assert.equal(result.inquiryEmail, "artwithrayan@gmail.com");
+      assert.equal(result.checkoutUrl, undefined);
+    }
+  }
+  assert.equal(f.calls.checkouts, checkoutsBefore);
+  assert.equal(f.sql.prepare("SELECT COUNT(*) AS count FROM payments").get().count, paymentsBefore);
+  assert.deepEqual(f.db.getOriginalById("the-light"), artBefore);
+});
+
 test("missing webhook signing configuration fails closed", async () => {
   const secret = process.env.STRIPE_WEBHOOK_SECRET;
   process.env.STRIPE_WEBHOOK_SECRET = "";

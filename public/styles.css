@@ -122,7 +122,10 @@
 .product-card > .notice { display: none; }
 .product-card .product-info > p { display: none; }
 .purchase-print { width: 100%; margin-top: 8px; }
-.purchase-original { width: 100%; margin-top: 8px; }
+.original-inquiry { width: 100%; margin-top: 8px; line-height: 1.5; letter-spacing: 0; }
+.original-inquiry:focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; }
+.original-contact-email { display: block; margin-top: 10px; color: var(--muted); font-size: 12px; line-height: 1.5; text-decoration: underline; overflow-wrap: anywhere; }
+.original-card .product-info > .product-meta { display: block; }
 .shine-button { width: 100%; margin-top: 8px; background: var(--bg); color: var(--ink); border-color: var(--ink); }
 .shine-button:hover, .shine-button[aria-pressed="true"] { background: var(--ink); color: var(--bg); }
 .original-art-image { background: transparent; border: 0; }

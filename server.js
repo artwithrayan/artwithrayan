@@ -24,6 +24,7 @@ const orders = createOrderProcessor({ db, stripe, printful, sheets, email });
 const AUTO_CHARGE_AUCTIONS = false;
 const STRIPE_CARD_PERCENT = 0.029;
 const STRIPE_CARD_FIXED_CENTS = 30;
+const ORIGINAL_INQUIRY_EMAIL = "artwithrayan@gmail.com";
 
 function grossUpStripeCardFee(amount) {
   const baseCents = Math.max(0, Math.round(Number(amount || 0) * 100));
@@ -492,68 +493,21 @@ app.get("/api/site-content", (req, res) => res.json({ content: db.getSiteContent
 
 app.get("/api/originals", (req, res) => {
   db.releaseStaleCheckoutReservations();
-  const originals = db.getOriginals().map((art) => ({ ...art, price: ["active", "payment_pending"].includes(art.status) ? prettyStripeAdjustedPrice(art.price) : art.price, currentBid: db.getCurrentBid(art.id) }));
-  res.json({ originals });
+  res.json({ originals: db.getOriginals(), inquiryEmail: ORIGINAL_INQUIRY_EMAIL });
 });
 
 app.get("/api/originals/:id", (req, res) => {
   db.releaseStaleCheckoutReservations();
   const art = db.getOriginalById(req.params.id);
   if (!art) return res.status(404).json({ error: "Original artwork not found." });
-  res.json({ original: { ...art, price: ["active", "payment_pending"].includes(art.status) ? prettyStripeAdjustedPrice(art.price) : art.price } });
+  res.json({ original: art, inquiryEmail: ORIGINAL_INQUIRY_EMAIL });
 });
 
-app.post("/api/originals/:id/shipping-rate", quoteRateLimit, (req, res) => {
-  const art = db.getOriginalById(req.params.id);
-  if (!art) return res.status(404).json({ error: "Original artwork not found." });
-  const recipient = printShippingRecipient(req.body);
-  const validationError = validatePrintShippingRecipient(recipient);
-  if (validationError) return res.status(400).json({ error: validationError });
-  const estimate = estimateOriginalShipping({ ...art, destinationState: recipient.state_code });
-  const customerPrice = prettyStripeAdjustedPrice(art.price);
-  res.json({ shipping: estimate.total, product: customerPrice, total: customerPrice + estimate.total, currency: "USD", name: "Estimated shipping", estimate });
-});
-
-app.post("/api/originals/:id/checkout", checkoutRateLimit, async (req, res) => {
-  if (!requireStripe(res)) return;
-  const art = db.getOriginalById(req.params.id);
-  if (!art) return res.status(404).json({ error: "Original artwork not found." });
-  if (art.status === "sold" || db.getPaidPaymentForOriginal(art.id)) return res.status(409).json({ error: "This original artwork has already been sold." });
-
-  const recipient = printShippingRecipient(req.body);
-  const validationError = validatePrintShippingRecipient(recipient);
-  if (validationError) return res.status(400).json({ error: validationError });
-  const estimate = estimateOriginalShipping({ ...art, destinationState: recipient.state_code });
-  const customerPrice = prettyStripeAdjustedPrice(art.price);
-  const totalAmount = customerPrice + estimate.total;
-  if (req.body.expectedTotal != null && Math.round(Number(req.body.expectedTotal) * 100) !== Math.round(totalAmount * 100)) return res.status(409).json({ error: "The total changed. Please calculate shipping again." });
-  if (!db.reserveOriginalCheckout(art.id)) return res.status(409).json({ error: "This original is currently unavailable or already being purchased." });
-
-  let payment = null;
-  try {
-    payment = db.createPayment({ kind: "original", originalId: art.id, stripeSessionId: `pending-${crypto.randomUUID()}`, checkoutUrl: "pending", customerName: recipient.name, customerEmail: recipient.email, subtotalAmount: customerPrice, shippingAmount: estimate.total, totalAmount, amount: totalAmount, shippingJson: { recipient, estimate }, status: "pending" });
-    db.setOriginalReservationOwner(art.id, payment.id);
-    const session = await stripe.checkout.sessions.create({
-      mode: "payment",
-      payment_method_types: ["card"],
-      customer_email: recipient.email,
-      payment_intent_data: { receipt_email: recipient.email },
-      line_items: [
-        { price_data: { currency: "usd", unit_amount: Math.round(customerPrice * 100), product_data: { name: art.title, description: `${art.medium} · ${art.size}` } }, quantity: 1 },
-        { price_data: { currency: "usd", unit_amount: Math.round(estimate.total * 100), product_data: { name: "Shipping", description: "Estimated shipping and packaging" } }, quantity: 1 }
-      ],
-      metadata: { kind: "original", originalId: art.id, localPaymentId: String(payment.id) },
-      expires_at: Math.floor(Date.now() / 1000) + 30 * 60,
-      success_url: `${BASE_URL}/success.html?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${BASE_URL}/originals.html`
-    });
-    db.setPaymentCheckoutSession(payment.id, session.id, session.url, session.expires_at);
-    res.json({ checkoutUrl: session.url });
-  } catch (error) {
-    if (payment) db.markPaymentFailed(payment.stripe_session_id, error.message || "Could not create checkout.");
-    db.releaseOriginalCheckout(art.id, payment?.id ?? null);
-    throw error;
-  }
+app.post(["/api/originals/:id/shipping-rate", "/api/originals/:id/checkout"], (req, res) => {
+  res.status(410).json({
+    error: "Original paintings are available by email inquiry only. Please contact us to arrange your purchase and shipping.",
+    inquiryEmail: ORIGINAL_INQUIRY_EMAIL
+  });
 });
 
 app.post("/api/print-club/checkout", checkoutRateLimit, async (req, res) => {

@@ -42,18 +42,32 @@ async function main() {
       assert.match(revealedSrc, /the-light-reveal.*\.webp$/);
       await page.locator(".shine-button").first().click();
       assert.match(await page.locator(".original-art-image img").first().getAttribute("src"), /the-light-[a-f0-9]+-\d+\.webp$/);
-      await page.locator(".purchase-original").first().click();
-      const dialog = page.locator("#printPurchaseDialog");
-      assert.match(await dialog.locator(".product-meta").innerText(), /9.*12/);
-      await fillAddress(dialog);
-      await dialog.locator(".quote-shipping").click();
-      await page.waitForFunction(() => !document.querySelector("dialog button[type=submit]").disabled);
-      await dialog.locator('[name="address1"]').fill("2 E Edenton St");
-      assert.equal(await dialog.locator("button[type=submit]").isDisabled(), true);
-      await dialog.locator(".dialog-close").click();
+      const originalCatalog = await (await fetch(base + "/api/originals")).json();
+      assert.equal(await page.locator(".purchase-original, .original-checkout-form, .shipping-box").count(), 0);
+      assert.equal(await page.locator("dialog").count(), 0);
+      for (const art of originalCatalog.originals) {
+        const card = page.locator(`[data-original-id="${art.id}"]`);
+        assert.equal(await card.locator(".price").innerText(), art.status === "sold" ? `Sold · $${art.price}` : `$${art.price}`);
+        assert.match(await card.locator(".product-meta").innerText(), new RegExp(art.size.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+        const inquiry = card.locator(".original-inquiry");
+        if (art.status === "sold") {
+          assert.equal(await inquiry.count(), 0);
+          continue;
+        }
+        assert.equal(await inquiry.textContent(), "Email if interested in purchasing");
+        const url = new URL(await inquiry.getAttribute("href"));
+        assert.equal(url.protocol, "mailto:");
+        assert.equal(url.pathname, "artwithrayan@gmail.com");
+        assert.equal(url.searchParams.get("subject"), `Purchase inquiry: ${art.title}`);
+        assert.ok(url.searchParams.get("body").includes(art.title));
+        assert.ok(url.searchParams.get("body").includes(art.size));
+        assert.ok(url.searchParams.get("body").includes(`$${art.price}`));
+        assert.equal(await card.locator(".original-contact-email").innerText(), "artwithrayan@gmail.com");
+      }
 
       await page.goto(base + "/prints.html");
       await page.locator(".view-products").first().click();
+      const dialog = page.locator("#printPurchaseDialog");
       await fillAddress(dialog);
       await dialog.locator(".quote-shipping").click();
       await page.waitForFunction(() => !document.querySelector("dialog button[type=submit]").disabled);
@@ -84,7 +98,7 @@ async function main() {
       await page.waitForFunction(() => !document.querySelector("dialog button[type=submit]").disabled);
       await page.screenshot({ path: path.join(output, `print-dialog-${width}.png`), fullPage: true });
       assert.deepEqual(errors, []);
-      results.push({ width, checkoutInvalidation: true, staleResponseIgnored: true, reveal: true, originalMetadata: true });
+      results.push({ width, checkoutInvalidation: true, staleResponseIgnored: true, reveal: true, originalEmailInquiries: true });
       await context.close();
     }
     const manifest = require("node:vm").runInNewContext(await fs.readFile(path.resolve(__dirname, "../public/image-assets.js"), "utf8") + ";window.ART_IMAGE_ASSETS", { window: {} });

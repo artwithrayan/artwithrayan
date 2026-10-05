@@ -1,6 +1,12 @@
 # Rayan Rao Art
 
-Fixed-price original paintings and Printful products, with Stripe Checkout, SQLite order storage, Google Sheets reporting, and shipment tracking emails. Auction and admin endpoints are disabled. Print Club is coming soon.
+Original paintings are available by email inquiry, while prints use Stripe Checkout, SQLite order storage, Google Sheets reporting, and shipment tracking emails. Auction, admin, and new original checkout endpoints are disabled. Print Club is coming soon.
+
+## Original Painting Inquiries
+
+Available originals link to artwithrayan@gmail.com with the artwork title, dimensions, medium, and listed price prefilled. They show their base prices without a Stripe processing markup. Sold originals remain in the gallery without an inquiry button.
+
+Original shipping and payment are arranged directly with the buyer. Email inquiries do not reserve artwork, create a payment, or add an order to Google Sheets. Record completed direct sales and update the artwork's sold status separately. Old original checkout and shipping-rate URLs return HTTP 410, but webhook processing and order recovery remain available for existing payments.
 
 ## Local Development
 
@@ -56,7 +62,7 @@ Stripe destination URL:
 https://artwithrayan.com/api/stripe/webhook
 ```
 
-Subscribe to checkout.session.completed and checkout.session.expired. For older delayed-payment sessions, also subscribe to checkout.session.async_payment_succeeded and checkout.session.async_payment_failed. New original/print checkouts use card payments only, including supported card wallets. Never acknowledge an unpaid checkout as paid. Webhooks fail closed if the signing secret is missing.
+Subscribe to checkout.session.completed and checkout.session.expired. For older delayed-payment sessions, also subscribe to checkout.session.async_payment_succeeded and checkout.session.async_payment_failed. New print checkouts use card payments only, including supported card wallets. Never acknowledge an unpaid checkout as paid. Webhooks fail closed if the signing secret is missing.
 
 Local testing:
 
@@ -93,7 +99,7 @@ Manual import:
 npm run sync:printful
 ```
 
-Printful shipping/tax is estimated from its API for the selected variant and address. Originals and self-fulfilled products use the internal dimension/weight/packaging estimate in src/shipping.js, not a live UPS rate. Changing a variant or address invalidates the quote. If the total changes before checkout, the buyer must request a new quote.
+Printful shipping/tax is estimated from its API for the selected variant and address. Self-fulfilled print products use the internal dimension/weight/packaging estimate in src/shipping.js, not a live UPS rate. Original shipping is arranged by email before payment. Changing a print variant or address invalidates the quote. If the total changes before checkout, the buyer must request a new quote.
 
 ## Images And Tests
 

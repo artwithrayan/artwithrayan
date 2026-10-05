@@ -83,31 +83,28 @@ async function renderOriginals() {
   try {
     const data = await fetchJson(`${API}/api/originals`);
     const originals = data.originals;
+    const inquiryEmail = data.inquiryEmail || "artwithrayan@gmail.com";
     if (!originals.length) { grid.innerHTML = "<p>No original paintings are currently available.</p>"; return; }
 
     grid.innerHTML = originals.map((art) => {
-      const isAvailable = art.status === "active";
-      const shipping = art.shippingEstimate || { total: 0, packageType: "shipping estimate unavailable", breakdown: {} };
+      const isAvailable = ["active", "payment_pending"].includes(art.status);
+      const inquirySubject = `Purchase inquiry: ${art.title}`;
+      const inquiryBody = `Hi Rayan,\n\nI'm interested in purchasing "${art.title}" (${art.size}, ${art.medium}), listed at ${money(art.price)}.\n\nCould you confirm availability and the total including shipping?\n\nThank you,\n`;
+      const inquiryUrl = `mailto:${inquiryEmail}?subject=${encodeURIComponent(inquirySubject)}&body=${encodeURIComponent(inquiryBody)}`;
 
       return `
-        <article class="product-card" data-original-id="${art.id}">
+        <article class="product-card original-card" data-original-id="${escapeHtml(art.id)}">
           ${artworkImage(art, "original-art-image", art.revealImageUrl ? `data-standard-image="${escapeHtml(art.imageUrl)}" data-reveal-image="${escapeHtml(art.revealImageUrl)}"` : "")}
           <div class="product-info">
             <div class="product-title-row"><h3>${escapeHtml(art.title)}</h3><span class="price">${art.status === "sold" ? (Number(art.price) > 0 ? `Sold · ${money(art.price)}` : "Sold") : money(art.price)}</span></div>
-            <p class="product-meta">${art.medium} · ${art.size} · ${art.year}</p>
+            <p class="product-meta">${escapeHtml(art.medium)} · ${escapeHtml(art.size)} · ${escapeHtml(art.year)}</p>
             <p>${escapeHtml(art.description)}</p>
-            <section class="shipping-box">
-              <div class="shipping-row"><span>Price</span><strong>${money(art.price)}</strong></div>
-              <div class="shipping-row"><span>Shipping</span><strong>Calculated at checkout</strong></div>
-            </section>
           </div>
-          ${art.revealImageUrl ? `<button type="button" class="shine-button" data-id="${art.id}" aria-pressed="false">Shine a light</button>` : ""}
-          ${isAvailable ? `<button type="button" class="purchase-original" data-id="${art.id}">Purchase original</button>` : `<p class="notice">${art.status === "sold" ? "Sold" : "Currently being purchased"}</p>`}
-          <p class="notice" id="notice-${art.id}"></p>
+          ${art.revealImageUrl ? `<button type="button" class="shine-button" data-id="${escapeHtml(art.id)}" aria-pressed="false">Shine a light</button>` : ""}
+          ${isAvailable ? `<a class="button original-inquiry" href="${escapeHtml(inquiryUrl)}" aria-label="${escapeHtml(`Email if interested in purchasing ${art.title}`)}">Email if interested in purchasing</a><a class="original-contact-email" href="${escapeHtml(inquiryUrl)}">${escapeHtml(inquiryEmail)}</a>` : ""}
         </article>`;
     }).join("");
     attachRevealHandlers();
-    attachOriginalPurchaseHandlers(originals);
   } catch (error) {
     grid.innerHTML = `<p class="notice error">Could not load originals. Make sure the backend is running.</p>`;
   }
@@ -134,25 +131,6 @@ function attachRevealHandlers() {
       card?.querySelector(".original-art-image")?.classList.toggle("is-revealed", !revealed);
     });
   });
-}
-
-function attachOriginalPurchaseHandlers(originals) {
-  document.querySelectorAll(".purchase-original").forEach((button) => {
-    button.addEventListener("click", () => {
-      const art = originals.find((item) => String(item.id) === String(button.dataset.id));
-      if (!art) return;
-      const dialog = ensurePrintDialog();
-      const content = dialog.querySelector("#printDialogContent");
-      content.innerHTML = `<div class="dialog-heading"><p class="section-label">Original artwork</p><h2>${escapeHtml(art.title)}</h2><p class="product-meta">${escapeHtml(art.medium)} · ${escapeHtml(art.size)}</p><p>${escapeHtml(art.description)}</p><p class="dialog-price">${money(art.price)} before shipping</p></div><form class="checkout-form original-checkout-form" data-id="${art.id}"><input name="name" type="text" placeholder="Full name" required /><input name="email" type="email" placeholder="Email for receipt" required /><input name="address1" type="text" placeholder="Address" required /><input name="address2" type="text" placeholder="Apartment, suite, etc. (optional)" /><div class="form-grid compact-grid"><input name="city" type="text" placeholder="City" required /><select name="state" required>${US_STATE_OPTIONS}</select><input name="postalCode" type="text" placeholder="ZIP code" required /></div><input name="country" type="text" value="US" placeholder="Country" required /><button type="button" class="quote-shipping">Calculate shipping</button><button type="submit" disabled>Continue to Stripe</button></form><p class="notice">Enter your mailing address to see the shipping estimate.</p>`;
-      attachOriginalCheckoutHandlers(content, art);
-      dialog.showModal();
-    });
-  });
-}
-
-function attachOriginalCheckoutHandlers(content, art) {
-  const form = content.querySelector(".original-checkout-form");
-  attachCheckoutHandler(form, "originals", content.querySelector(".notice"));
 }
 
 function renderPrintGallery(artworks, grid) {
@@ -288,7 +266,7 @@ function attachPrintPurchaseHandlers(prints) {
 }
 
 function attachPrintCheckoutHandlers(root = document) {
-  root.querySelectorAll(".checkout-form:not(.original-checkout-form)").forEach((form) => {
+  root.querySelectorAll(".checkout-form").forEach((form) => {
     attachCheckoutHandler(form, "prints", form.parentElement.querySelector(".notice"));
   });
 }
