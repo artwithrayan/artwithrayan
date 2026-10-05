@@ -50,13 +50,22 @@ const printful = require("../src/printful");
 const sheets = require("../src/google-sheets");
 const email = require("../src/email");
 const originalSheetsAppend = sheets.appendPaidOrder;
+printful.getShippingCountries = async () => [
+  { code: "US", name: "United States", states: [{ code: "NC", name: "North Carolina" }] },
+  { code: "CA", name: "Canada", states: [{ code: "ON", name: "Ontario" }] },
+  { code: "AU", name: "Australia", states: [{ code: "NSW", name: "New South Wales" }] },
+  { code: "GB", name: "United Kingdom", states: [] },
+  { code: "FR", name: "France", states: [] },
+  { code: "HK", name: "Hong Kong", states: [] },
+  { code: "BR", name: "Brazil", states: [{ code: "SP", name: "Sao Paulo" }] }
+];
 printful.createDraftOrderFromStripeSession = async ({ payment }) => {
   calls.drafts++;
   if (failures.drafts) throw new Error("Temporary draft outage");
   return { printfulOrderId: `draft-${payment.id}` };
 };
 printful.getShippingRatesForPrint = async () => [{ id: "STANDARD", name: "Standard", rate: "4.99", currency: "USD" }];
-printful.estimatePrintCosts = async () => ({ costs: { subtotal: "8.00", shipping: "4.99", tax: "0.76", total: "13.75" } });
+printful.estimatePrintCosts = async () => ({ costs: { currency: "USD", subtotal: "8.00", shipping: "4.99", tax: "0.76", total: "13.75" } });
 sheets.isConfigured = () => true;
 sheets.appendPaidOrder = async () => {
   calls.sheets++;
@@ -92,4 +101,4 @@ function signedEvent(type, object) {
   return { payload, signature: sdk.webhooks.generateTestHeaderString({ payload, secret: process.env.STRIPE_WEBHOOK_SECRET }) };
 }
 
-module.exports = { ...server, db, sql, calls, failures, sessions, payment, signedEvent, tempDir, sheets, originalSheetsAppend };
+module.exports = { ...server, db, sql, calls, failures, sessions, payment, signedEvent, tempDir, sheets, printful, originalSheetsAppend };

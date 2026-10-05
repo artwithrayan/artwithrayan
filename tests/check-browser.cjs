@@ -47,13 +47,16 @@ async function main() {
       assert.equal(await page.locator("dialog").count(), 0);
       for (const art of originalCatalog.originals) {
         const card = page.locator(`[data-original-id="${art.id}"]`);
-        assert.equal(await card.locator(".price").innerText(), art.status === "sold" ? `Sold · $${art.price}` : `$${art.price}`);
+        assert.equal(await card.locator(".price").count(), 0);
+        assert.doesNotMatch(await card.innerText(), /\$\s*\d/);
         assert.match(await card.locator(".product-meta").innerText(), new RegExp(art.size.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
         const inquiry = card.locator(".original-inquiry");
         if (art.status === "sold") {
           assert.equal(await inquiry.count(), 0);
+          assert.equal(await card.locator(".original-status").innerText(), "Sold");
           continue;
         }
+        assert.equal(await card.locator(".original-status").count(), 0);
         assert.equal(await inquiry.textContent(), "Email if interested in purchasing");
         const url = new URL(await inquiry.getAttribute("href"));
         assert.equal(url.protocol, "mailto:");
@@ -61,7 +64,8 @@ async function main() {
         assert.equal(url.searchParams.get("subject"), `Purchase inquiry: ${art.title}`);
         assert.ok(url.searchParams.get("body").includes(art.title));
         assert.ok(url.searchParams.get("body").includes(art.size));
-        assert.ok(url.searchParams.get("body").includes(`$${art.price}`));
+        assert.doesNotMatch(url.searchParams.get("body"), /\$\s*\d/);
+        assert.ok(url.searchParams.get("body").includes("pricing"));
         assert.equal(await card.locator(".original-contact-email").innerText(), "artwithrayan@gmail.com");
       }
 
@@ -97,8 +101,52 @@ async function main() {
       await dialog.locator(".quote-shipping").click();
       await page.waitForFunction(() => !document.querySelector("dialog button[type=submit]").disabled);
       await page.screenshot({ path: path.join(output, `print-dialog-${width}.png`), fullPage: true });
+      await dialog.locator('[name="country"]').selectOption("CA");
+      assert.equal(await dialog.locator("button[type=submit]").isDisabled(), true);
+      assert.equal(await dialog.locator('[name="phone"]').getAttribute("required"), "");
+      assert.equal(await dialog.locator('[data-international-notice]').isVisible(), true);
+      await dialog.locator('[name="state"]').selectOption("ON");
+      await dialog.locator('[name="city"]').fill("Toronto");
+      await dialog.locator('[name="postalCode"]').fill("M5V 2T6");
+      await dialog.locator('[name="phone"]').fill("+1 416 555 0123");
+      await dialog.locator(".quote-shipping").click();
+      await page.waitForFunction(() => !document.querySelector("dialog button[type=submit]").disabled);
+      await dialog.locator('[name="country"]').selectOption("GB");
+      assert.equal(await dialog.locator("button[type=submit]").isDisabled(), true);
+      assert.equal(await dialog.locator('[name="state"]').evaluate((element) => element.tagName), "INPUT");
+      assert.equal(await dialog.locator('[name="state"]').getAttribute("required"), null);
+      assert.equal(await dialog.locator('[name="postalCode"]').getAttribute("required"), "");
+      await dialog.locator('[name="city"]').fill("London");
+      await dialog.locator('[name="postalCode"]').fill("SW1A 1AA");
+      await dialog.locator('[name="phone"]').fill("+44 7700 900123");
+      await dialog.locator(".quote-shipping").click();
+      await page.waitForFunction(() => !document.querySelector("dialog button[type=submit]").disabled);
+      assert.equal(await dialog.evaluate((element) => element.scrollWidth > element.clientWidth + 1), false);
+      await page.screenshot({ path: path.join(output, `international-dialog-${width}.png`), fullPage: true });
+      await dialog.locator("form").evaluate((form) => { form.dataset.fulfillmentType = "self"; form.dispatchEvent(new Event("quoteinvalidated")); });
+      assert.equal(await dialog.locator('[name="country"]').inputValue(), "US");
+      assert.equal(await dialog.locator('[name="country"] option').count(), 1);
+      assert.equal(await dialog.locator("button[type=submit]").isDisabled(), true);
+      await dialog.locator("form").evaluate((form) => { form.dataset.fulfillmentType = "printful"; form.dispatchEvent(new Event("quoteinvalidated")); });
+      await dialog.locator('[name="country"]').selectOption("HK");
+      assert.equal(await dialog.locator('[name="postalCode"]').getAttribute("required"), null);
+      await dialog.locator('[name="country"]').selectOption("BR");
+      assert.equal(await dialog.locator('[name="taxNumber"]').isVisible(), true);
+      assert.equal(await dialog.locator('[name="taxNumber"]').getAttribute("required"), "");
+      await dialog.locator('[name="state"]').selectOption("SP");
+      await dialog.locator('[name="city"]').fill("Sao Paulo");
+      await dialog.locator('[name="postalCode"]').fill("01310-100");
+      await dialog.locator('[name="phone"]').fill("+55 11 95555 0123");
+      await dialog.locator('[name="taxNumber"]').fill("529.982.247-25");
+      await dialog.locator(".quote-shipping").click();
+      await page.waitForFunction(() => !document.querySelector("dialog button[type=submit]").disabled);
+      await dialog.locator('[name="country"]').selectOption("US");
+      assert.equal(await dialog.locator('[name="taxNumber"]').isVisible(), false);
+      assert.equal(await dialog.locator('[name="taxNumber"]').isDisabled(), true);
+      assert.equal(await dialog.locator('[data-international-notice]').isVisible(), false);
+      assert.equal(await dialog.locator('[name="phone"]').getAttribute("required"), null);
       assert.deepEqual(errors, []);
-      results.push({ width, checkoutInvalidation: true, staleResponseIgnored: true, reveal: true, originalEmailInquiries: true });
+      results.push({ width, checkoutInvalidation: true, staleResponseIgnored: true, reveal: true, originalEmailInquiries: true, internationalAddresses: true });
       await context.close();
     }
     const manifest = require("node:vm").runInNewContext(await fs.readFile(path.resolve(__dirname, "../public/image-assets.js"), "utf8") + ";window.ART_IMAGE_ASSETS", { window: {} });
@@ -115,7 +163,9 @@ async function main() {
 }
 
 async function fillAddress(root) {
-  for (const [name, value] of Object.entries({ name: "Test Buyer", email: "test@example.com", address1: "1 E Edenton St", city: "Raleigh", postalCode: "27601", country: "US" })) await root.locator(`[name="${name}"]`).fill(value);
+  await root.locator('[name="country"] option[value="GB"]').waitFor({ state: "attached" });
+  await root.locator('[name="country"]').selectOption("US");
+  for (const [name, value] of Object.entries({ name: "Test Buyer", email: "test@example.com", address1: "1 E Edenton St", city: "Raleigh", postalCode: "27601" })) await root.locator(`[name="${name}"]`).fill(value);
   await root.locator('[name="state"]').selectOption("NC");
 }
 

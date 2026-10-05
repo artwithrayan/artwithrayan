@@ -37,6 +37,87 @@ test("Printful recovers an accepted POST whose response was lost", async () => {
   assert.equal(result.printfulOrderId, 76);
 });
 
+test("international Printful drafts forward shipping phone, email, and optional region", async () => {
+  const printful = require("../src/printful");
+  global.fetch = async (_url, options) => {
+    if (options.method === "GET") return response({ error: { message: "Not found" } }, 404);
+    const { recipient } = JSON.parse(options.body);
+    assert.equal(recipient.country_code, "GB");
+    assert.equal(recipient.state_code, "");
+    assert.equal(recipient.address2, "");
+    assert.equal(recipient.zip, "SW1A 1AA");
+    assert.equal(recipient.phone, "+447700900123");
+    assert.equal(recipient.email, "test@example.com");
+    const payload = JSON.parse(options.body);
+    assert.equal(payload.items[0].retail_price, "19.00");
+    assert.deepEqual(payload.retail_costs, { currency: "USD", subtotal: "19.00" });
+    return response({ result: { id: 77 } });
+  };
+  const recipient = { name: "Test", address1: "10 Test Street", city: "London", country_code: "GB", zip: "SW1A 1AA", phone: "+447700900123", email: "test@example.com" };
+  const result = await printful.createDraftOrderFromStripeSession({ payment: { id: 125, subtotal_amount: 19, shipping_json: JSON.stringify({ recipient }) }, print: { printfulSyncVariantId: "100" }, stripeSession: { customer_details: { address: { line2: "Billing apartment", state: "NC", country: "US", postal_code: "27601" } } } });
+  assert.equal(result.printfulOrderId, 77);
+});
+
+test("international estimates pass the actual displayed retail value in USD", async () => {
+  const printful = require("../src/printful");
+  global.fetch = async (url, options) => {
+    assert.match(url, /orders\/estimate-costs$/);
+    const payload = JSON.parse(options.body);
+    assert.equal(payload.items[0].retail_price, "19.00");
+    assert.deepEqual(payload.retail_costs, { currency: "USD", subtotal: "19.00" });
+    return response({ result: { costs: { currency: "USD", total: "14.00" } } });
+  };
+  assert.equal((await printful.estimatePrintCosts({ print: { printfulVariantId: "16364" }, recipient: { country_code: "GB" }, retailPrice: 19 })).costs.currency, "USD");
+});
+
+test("destinations without postal codes do not borrow a ZIP code from the billing address", async () => {
+  const printful = require("../src/printful");
+  global.fetch = async (_url, options) => {
+    if (options.method === "GET") return response({ error: { message: "Not found" } }, 404);
+    const { recipient } = JSON.parse(options.body);
+    assert.equal(recipient.country_code, "HK");
+    assert.equal(recipient.zip, "");
+    assert.equal(recipient.state_code, "");
+    assert.equal(recipient.address2, "");
+    return response({ result: { id: 79 } });
+  };
+  const recipient = { name: "Test", address1: "Test Street", city: "Hong Kong", country_code: "HK", zip: "", state_code: "", phone: "+85221234567" };
+  const params = { payment: { id: 127, shipping_json: JSON.stringify({ recipient }) }, print: { printfulSyncVariantId: "100" }, stripeSession: { customer_details: { address: { state: "CA", line2: "Billing apartment", postal_code: "94103", country: "US" } } } };
+  assert.equal((await printful.createDraftOrderFromStripeSession(params)).printfulOrderId, 79);
+});
+
+test("country metadata is public, caches concurrent requests, and retries failed responses", async () => {
+  const printful = require("../src/printful");
+  let requests = 0;
+  global.fetch = async (url, options) => {
+    requests++;
+    assert.equal(url, "https://api.printful.com/countries");
+    assert.equal(options.headers, undefined);
+    assert.ok(options.signal);
+    if (requests === 1) return response({}, 503);
+    return response({ result: [{ code: "US", name: "United States", states: [{ code: "NC", name: "North Carolina" }] }, { code: "GB", name: "United Kingdom", states: null }] });
+  };
+  await assert.rejects(printful.getShippingCountries(), /Could not load/);
+  const [first, second] = await Promise.all([printful.getShippingCountries(), printful.getShippingCountries()]);
+  assert.deepEqual(first, second);
+  assert.deepEqual(first[1].states, []);
+  await printful.getShippingCountries();
+  assert.equal(requests, 2);
+});
+
+test("Printful Brazilian drafts include the recipient's required tax ID", async () => {
+  const printful = require("../src/printful");
+  global.fetch = async (_url, options) => {
+    if (options.method === "GET") return response({ error: { message: "Not found" } }, 404);
+    const { recipient } = JSON.parse(options.body);
+    assert.equal(recipient.country_code, "BR");
+    assert.equal(recipient.tax_number, "529.982.247-25");
+    return response({ result: { id: 78 } });
+  };
+  const recipient = { name: "Test", address1: "Test Street", city: "Sao Paulo", state_code: "SP", country_code: "BR", zip: "01310-100", phone: "+5511955550123", tax_number: "529.982.247-25" };
+  assert.equal((await printful.createDraftOrderFromStripeSession({ payment: { id: 126, shipping_json: JSON.stringify({ recipient }) }, print: { printfulSyncVariantId: "100" }, stripeSession: {} })).printfulOrderId, 78);
+});
+
 test("Resend returned error objects are failures, not successful sends", async () => {
   process.env.RESEND_API_KEY = "test-resend";
   process.env.FROM_EMAIL = "Rayan <shipping@artwithrayan.com>";

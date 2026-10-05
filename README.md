@@ -4,7 +4,7 @@ Original paintings are available by email inquiry, while prints use Stripe Check
 
 ## Original Painting Inquiries
 
-Available originals link to artwithrayan@gmail.com with the artwork title, dimensions, medium, and listed price prefilled. They show their base prices without a Stripe processing markup. Sold originals remain in the gallery without an inquiry button.
+Available originals link to artwithrayan@gmail.com with the artwork title, dimensions, and medium prefilled. Prices are omitted from the gallery, inquiry emails, and public original API responses; historical prices remain stored internally. Buyers request pricing and shipping by email. Sold originals remain in the gallery labeled Sold, without an inquiry button or sale price.
 
 Original shipping and payment are arranged directly with the buyer. Email inquiries do not reserve artwork, create a payment, or add an order to Google Sheets. Record completed direct sales and update the artwork's sold status separately. Old original checkout and shipping-rate URLs return HTTP 410, but webhook processing and order recovery remain available for existing payments.
 
@@ -100,6 +100,12 @@ npm run sync:printful
 ```
 
 Printful shipping/tax is estimated from its API for the selected variant and address. Self-fulfilled print products use the internal dimension/weight/packaging estimate in src/shipping.js, not a live UPS rate. Original shipping is arranged by email before payment. Changing a print variant or address invalidates the quote. If the total changes before checkout, the buyer must request a new quote.
+
+Printful checkout accepts international destinations using Printful's cached country/state metadata. This address list is not a promise of product availability: each selected variant and destination must return both a shipping rate and a fulfillment estimate before checkout. Canada and Australia require a province/state. Postal codes are required for country formats recognized by the existing Validator library; destinations without postal codes, such as Hong Kong, can leave this blank. International deliveries require a phone number including its country code. Brazilian recipients must provide a valid numeric CPF/CNPJ tax ID, which is stored with the shipping address and forwarded to Printful, not copied into the public catalog. Self-fulfilled prints remain US-only. Originals remain email-only.
+
+Checkout and fulfillment estimates must both be in USD; mixed-currency quotes are rejected rather than silently converted. Shipping uses the fulfillment estimate when available so store shipping settings are reflected. International buyers are warned that customs duties, import taxes, and carrier handling fees may be payable separately. These are not guaranteed to be included in the Printful fulfillment-tax estimate. The existing Stripe fee/profit estimate uses domestic card rates; actual international-card fees can be higher. No product prices or fee markup were changed for international shipping.
+
+International fulfillment estimates and drafts include the customer's actual product price as the USD retail value. Optional mailing-address fields are preserved as entered rather than replaced with values from the Stripe billing address.
 
 ## Images And Tests
 

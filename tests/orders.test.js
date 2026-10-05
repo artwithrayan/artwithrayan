@@ -134,15 +134,146 @@ test("unsigned Stripe and unauthorized Printful webhooks remain rejected", async
   assert.equal((await fetch(`${base}/api/printful/webhook`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })).status, 401);
 });
 
-test("original listings use base prices and provide the inquiry address", async () => {
+const internationalAddress = { name: "Test Buyer", email: "test@example.com", address1: "10 Test Street", city: "London", country: "GB", phone: "+44 7700 900123", postalCode: "SW1A 1AA" };
+async function printRequest(endpoint, body) {
+  return fetch(`${base}/api/prints/test-small/${endpoint}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+}
+
+test("shipping metadata exposes country-specific regions", async () => {
+  const response = await fetch(`${base}/api/shipping/countries`);
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get("cache-control"), /max-age=3600/);
+  const { countries } = await response.json();
+  assert.ok(countries.find((country) => country.code === "CA").states.some((state) => state.code === "ON"));
+  assert.deepEqual(countries.find((country) => country.code === "GB").states, []);
+});
+
+test("international checkout preserves destination, phone, currency, and cents", async () => {
+  for (const fields of [
+    { country: "CA", state: "ON", city: "Toronto", postalCode: "M5V 2T6", phone: "+1 (416) 555-0123" },
+    { country: "AU", state: "NSW", city: "Sydney", postalCode: "2000", phone: "+61 412 345 678" },
+    { country: "GB", state: "", city: "London", postalCode: "SW1A 1AA", phone: "+44 7700 900123" },
+    { country: "HK", state: "", city: "Hong Kong", postalCode: "", phone: "+852 2123 4567" },
+    { country: "BR", state: "SP", city: "Sao Paulo", postalCode: "01310-100", phone: "+55 11 95555 0123", taxNumber: "52998224725" }
+  ]) {
+    const body = { ...internationalAddress, ...fields, expectedTotal: 21.75 };
+    const quote = await printRequest("shipping-rate", body);
+    assert.equal(quote.status, 200, JSON.stringify(fields));
+    assert.equal((await quote.json()).currency, "USD");
+    assert.equal((await printRequest("checkout", body)).status, 200);
+    const session = f.sessions.get(`cs_test_${f.calls.checkouts}`);
+    const payment = f.db.getPaymentByStripeSessionId(session.id);
+    const recipient = JSON.parse(payment.shipping_json).recipient;
+    assert.equal(recipient.country_code, fields.country);
+    assert.equal(recipient.state_code, fields.state);
+    assert.equal(recipient.zip, fields.postalCode);
+    assert.match(recipient.phone, /^\+[1-9]\d{6,14}$/);
+    if (fields.country === "BR") assert.equal(recipient.tax_number, "529.982.247-25");
+    else assert.equal(Object.hasOwn(recipient, "tax_number"), false);
+    assert.equal(session.amount_total, 2175);
+    assert.ok(session.line_items.every((line) => line.price_data.currency === "usd"));
+  }
+});
+
+test("invalid country, province, and international phone are rejected before quoting", async () => {
+  const quote = f.printful.getShippingRatesForPrint;
+  let calls = 0;
+  f.printful.getShippingRatesForPrint = async () => { calls++; return []; };
+  try {
+    for (const fields of [
+      { country: "ZZ" }, { country: "Canada" }, { phone: "" }, { phone: "123" },
+      { country: "CA", state: "", postalCode: "M5V 2T6" },
+      { country: "CA", state: "NC", postalCode: "M5V 2T6" },
+      { country: "AU", state: "NSW", postalCode: "" },
+      { country: "GB", postalCode: "" },
+      { country: "BR", state: "SP", postalCode: "01310-100", taxNumber: "" },
+      { country: "BR", state: "SP", postalCode: "01310-100", taxNumber: "11111111111" }
+    ]) assert.equal((await printRequest("shipping-rate", { ...internationalAddress, ...fields })).status, 400);
+    assert.equal(calls, 0);
+  } finally { f.printful.getShippingRatesForPrint = quote; }
+});
+
+test("Brazilian shipping tax IDs are forwarded to the estimate and do not leak across destinations", async () => {
+  const rates = f.printful.getShippingRatesForPrint;
+  const costs = f.printful.estimatePrintCosts;
+  const recipients = [];
+  f.printful.getShippingRatesForPrint = async (params) => { recipients.push(params.recipient); return rates(params); };
+  f.printful.estimatePrintCosts = async (params) => { recipients.push(params.recipient); return costs(params); };
+  try {
+    assert.equal((await printRequest("shipping-rate", { ...internationalAddress, country: "BR", state: "SP", postalCode: "01310-100", taxNumber: "529.982.247-25" })).status, 200);
+    assert.equal((await printRequest("shipping-rate", { ...internationalAddress, taxNumber: "529.982.247-25" })).status, 200);
+    assert.equal(recipients[0].tax_number, "529.982.247-25");
+    assert.equal(recipients[1].tax_number, recipients[0].tax_number);
+    assert.equal(Object.hasOwn(recipients[2], "tax_number"), false);
+    assert.equal(Object.hasOwn(recipients[3], "tax_number"), false);
+  } finally { f.printful.getShippingRatesForPrint = rates; f.printful.estimatePrintCosts = costs; }
+});
+
+test("self-fulfilled prints cannot use domestic estimates for international orders", async () => {
+  f.sql.prepare("UPDATE prints SET fulfillment_type='self' WHERE id='test-small'").run();
+  const before = f.calls.checkouts;
+  try {
+    assert.equal((await printRequest("shipping-rate", internationalAddress)).status, 400);
+    assert.equal((await printRequest("checkout", internationalAddress)).status, 400);
+    assert.equal(f.calls.checkouts, before);
+  } finally { f.sql.prepare("UPDATE prints SET fulfillment_type='printful' WHERE id='test-small'").run(); }
+});
+
+test("unavailable shipping and mixed-currency estimates never create checkout", async () => {
+  const rates = f.printful.getShippingRatesForPrint;
+  const costs = f.printful.estimatePrintCosts;
+  const before = f.calls.checkouts;
+  try {
+    f.printful.getShippingRatesForPrint = async () => [];
+    assert.equal((await printRequest("checkout", internationalAddress)).status, 400);
+    f.printful.getShippingRatesForPrint = async () => [{ id: "STANDARD", rate: "4.99", currency: "EUR" }];
+    assert.equal((await printRequest("checkout", internationalAddress)).status, 502);
+    f.printful.getShippingRatesForPrint = rates;
+    f.printful.estimatePrintCosts = async () => ({ costs: { currency: "EUR", shipping: "4.99" } });
+    assert.equal((await printRequest("checkout", internationalAddress)).status, 502);
+    f.printful.estimatePrintCosts = async () => ({ costs: { currency: "USD", shipping: "-1" } });
+    assert.equal((await printRequest("checkout", internationalAddress)).status, 502);
+    assert.equal(f.calls.checkouts, before);
+  } finally { f.printful.getShippingRatesForPrint = rates; f.printful.estimatePrintCosts = costs; }
+});
+
+test("fulfillment shipping and VAT are reflected in the customer quote", async () => {
+  const costs = f.printful.estimatePrintCosts;
+  f.printful.estimatePrintCosts = async () => ({ costs: { currency: "USD", shipping: "8.22", vat: "2.31", tax: "0" } });
+  try {
+    const response = await printRequest("shipping-rate", internationalAddress);
+    assert.equal(response.status, 200);
+    const quote = await response.json();
+    assert.equal(quote.shipping, 8.22);
+    assert.equal(quote.fulfillmentTax, 2.31);
+    assert.equal(Math.round(quote.total * 100), 2653);
+  } finally { f.printful.estimatePrintCosts = costs; }
+});
+
+test("a country metadata outage fails closed internationally but leaves US quotes usable", async () => {
+  const countries = f.printful.getShippingCountries;
+  f.printful.getShippingCountries = async () => { throw new Error("Temporary country metadata outage"); };
+  try {
+    assert.equal((await fetch(`${base}/api/shipping/countries`)).status, 502);
+    assert.equal((await printRequest("shipping-rate", internationalAddress)).status, 502);
+    assert.equal((await printRequest("shipping-rate", { ...internationalAddress, country: "US", state: "NC", postalCode: "27601", phone: "" })).status, 200);
+  } finally { f.printful.getShippingCountries = countries; }
+});
+
+test("original listings omit public prices while preserving internal records and the inquiry address", async () => {
+  const storedOriginals = f.db.getOriginals();
   const catalog = await (await fetch(`${base}/api/originals`)).json();
   assert.equal(catalog.inquiryEmail, "artwithrayan@gmail.com");
   for (const art of catalog.originals) {
-    assert.equal(art.price, f.db.getOriginalById(art.id).price);
+    assert.equal(Object.hasOwn(art, "price"), false);
+    assert.equal(Object.hasOwn(art, "startingBid"), false);
+    assert.equal(art.title, f.db.getOriginalById(art.id).title);
   }
   const detail = await (await fetch(`${base}/api/originals/the-light`)).json();
-  assert.equal(detail.original.price, f.db.getOriginalById("the-light").price);
+  assert.equal(Object.hasOwn(detail.original, "price"), false);
+  assert.equal(Object.hasOwn(detail.original, "startingBid"), false);
   assert.equal(detail.inquiryEmail, catalog.inquiryEmail);
+  assert.deepEqual(f.db.getOriginals(), storedOriginals);
 });
 
 test("original checkout and shipping endpoints cannot create orders or reservations", async () => {

@@ -491,16 +491,20 @@ app.get("/api/health", (req, res) => res.json({
 
 app.get("/api/site-content", (req, res) => res.json({ content: db.getSiteContent() }));
 
+function publicOriginalDetails({ price, startingBid, ...art }) {
+  return art;
+}
+
 app.get("/api/originals", (req, res) => {
   db.releaseStaleCheckoutReservations();
-  res.json({ originals: db.getOriginals(), inquiryEmail: ORIGINAL_INQUIRY_EMAIL });
+  res.json({ originals: db.getOriginals().map(publicOriginalDetails), inquiryEmail: ORIGINAL_INQUIRY_EMAIL });
 });
 
 app.get("/api/originals/:id", (req, res) => {
   db.releaseStaleCheckoutReservations();
   const art = db.getOriginalById(req.params.id);
   if (!art) return res.status(404).json({ error: "Original artwork not found." });
-  res.json({ original: art, inquiryEmail: ORIGINAL_INQUIRY_EMAIL });
+  res.json({ original: publicOriginalDetails(art), inquiryEmail: ORIGINAL_INQUIRY_EMAIL });
 });
 
 app.post(["/api/originals/:id/shipping-rate", "/api/originals/:id/checkout"], (req, res) => {
@@ -679,35 +683,65 @@ app.get("/api/prints", (req, res) => {
 });
 
 function printShippingRecipient(body) {
-  return { name: String(body.name || "").trim(), address1: String(body.address1 || "").trim(), address2: String(body.address2 || "").trim(), city: String(body.city || "").trim(), state_code: String(body.state || "").trim().toUpperCase(), country_code: String(body.country || "US").trim().toUpperCase(), zip: String(body.postalCode || "").trim(), email: String(body.email || "").trim().toLowerCase() };
+  const country = String(body.country || "US").trim().toUpperCase();
+  const taxDigits = String(body.taxNumber || "").trim().replace(/[\s./-]/g, "");
+  const taxNumber = /^\d{11}$/.test(taxDigits) ? taxDigits.replace(/^(\d{3})(\d{3})(\d{3})(\d{2})$/, "$1.$2.$3-$4")
+    : /^\d{14}$/.test(taxDigits) ? taxDigits.replace(/^(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})$/, "$1.$2.$3/$4-$5") : taxDigits;
+  return { name: String(body.name || "").trim(), address1: String(body.address1 || "").trim(), address2: String(body.address2 || "").trim(), city: String(body.city || "").trim(), state_code: String(body.state || "").trim().toUpperCase(), country_code: country, zip: String(body.postalCode || "").trim(), email: String(body.email || "").trim().toLowerCase(), phone: String(body.phone || "").trim().replace(/[\s().-]/g, ""), ...(country === "BR" ? { tax_number: taxNumber } : {}) };
+}
+
+function shippingPostalCodeRequired(countryCode) {
+  return validator.isPostalCodeLocales.includes(countryCode);
 }
 
 function validatePrintShippingRecipient(recipient) {
   if (recipient.name.length < 2) return "Please enter the recipient name.";
   if (!validator.isEmail(recipient.email)) return "Please enter a valid email address.";
-  if (!recipient.address1 || !recipient.city || !recipient.state_code || !recipient.zip) return "Please complete the shipping address.";
-  if (recipient.country_code !== "US") return "This checkout currently supports US shipping only.";
+  if (!recipient.address1 || !recipient.city) return "Please complete the shipping address.";
+  if (!/^[A-Z]{2}$/.test(recipient.country_code)) return "Please select a valid shipping country.";
+  if (["US", "CA", "AU"].includes(recipient.country_code) && (!recipient.state_code || !recipient.zip)) return "Please enter your state or province and postal code.";
+  if (shippingPostalCodeRequired(recipient.country_code) && !recipient.zip) return "Please enter your postal code.";
+  if (recipient.country_code !== "US" && !/^\+[1-9]\d{6,14}$/.test(recipient.phone)) return "Please enter a phone number with country code, such as +44 7700 900123, for international delivery.";
+  if (recipient.country_code === "BR" && (!/^\d{3}\.\d{3}\.\d{3}-\d{2}$|^\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2}$/.test(recipient.tax_number) || !validator.isTaxID(recipient.tax_number.replace(/[./-]/g, ""), "pt-BR"))) return "Please enter a valid recipient CPF or CNPJ tax ID for delivery to Brazil.";
   return null;
 }
 
+app.get("/api/shipping/countries", async (_req, res) => {
+  try {
+    const countries = (await printful.getShippingCountries()).map((country) => ({ ...country, postalCodeRequired: shippingPostalCodeRequired(country.code) }));
+    res.set("Cache-Control", "public, max-age=3600").json({ countries });
+  } catch (error) { res.status(502).json({ error: error.message }); }
+});
+
 async function getPrintShippingQuote(print, body) {
   const recipient = printShippingRecipient(body);
+  if (print.fulfillmentType === "self" && recipient.country_code !== "US") throw Object.assign(new Error("Self-fulfilled prints currently ship within the US only."), { statusCode: 400 });
   const validationError = validatePrintShippingRecipient(recipient);
   if (validationError) { const error = new Error(validationError); error.statusCode = 400; throw error; }
   if (print.fulfillmentType === "self") {
     const estimate = estimateSelfFulfillmentShipping(print, recipient);
     return { recipient, rate: { id: "SELF_ESTIMATE", name: "Estimated shipping", currency: "USD" }, shippingAmount: estimate.total, fulfillmentTax: 0, fulfillmentCosts: null, selfEstimate: estimate };
   }
+  if (recipient.country_code !== "US") {
+    const countries = await printful.getShippingCountries();
+    const country = countries.find((candidate) => candidate.code === recipient.country_code);
+    if (!country) throw Object.assign(new Error("This shipping country is not supported."), { statusCode: 400 });
+    if (country.states.length && recipient.state_code && !country.states.some((state) => state.code === recipient.state_code)) throw Object.assign(new Error("Please select a valid state or province for your country."), { statusCode: 400 });
+  }
   const rates = await printful.getShippingRatesForPrint({ print, recipient });
   const rate = rates.find((candidate) => candidate.id === "STANDARD") || rates[0];
-  if (!rate || !Number.isFinite(Number(rate.rate))) throw new Error("Printful did not return a shipping rate for this address.");
-  const estimate = await printful.estimatePrintCosts({ print, recipient, shippingMethod: rate.id });
-  const costs = estimate?.costs || {};
+  if (!rate) throw Object.assign(new Error("This product cannot currently be shipped to your address. Please choose another destination or contact artwithrayan@gmail.com."), { statusCode: 400 });
+  if (!Number.isFinite(Number(rate.rate)) || Number(rate.rate) < 0) throw new Error("Printful returned an invalid shipping rate. Please try again.");
+  if (String(rate.currency).toUpperCase() !== "USD") throw new Error("Could not quote shipping in USD. Please contact artwithrayan@gmail.com.");
+  const estimate = await printful.estimatePrintCosts({ print, recipient, shippingMethod: rate.id, retailPrice: prettyStripeAdjustedPrice(print.price) });
+  const costs = estimate?.costs;
+  if (!costs || String(costs.currency || rate.currency).toUpperCase() !== "USD") throw new Error("Could not estimate fulfillment costs in USD. Please contact artwithrayan@gmail.com.");
+  if ([costs.shipping ?? rate.rate, costs.tax || 0, costs.vat || 0].some((amount) => !Number.isFinite(Number(amount)) || Number(amount) < 0)) throw new Error("Printful returned an invalid cost estimate. Please try again.");
   const fulfillmentTax = Math.round((Number(costs.tax || 0) + Number(costs.vat || 0)) * 100) / 100;
   return {
     recipient,
     rate,
-    shippingAmount: Math.round(Number(rate.rate) * 100) / 100,
+    shippingAmount: Math.round(Number(costs.shipping ?? rate.rate) * 100) / 100,
     fulfillmentTax,
     fulfillmentCosts: {
       currency: costs.currency || rate.currency || "USD",

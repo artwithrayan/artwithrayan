@@ -126,6 +126,7 @@
 .original-inquiry:focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; }
 .original-contact-email { display: block; margin-top: 10px; color: var(--muted); font-size: 12px; line-height: 1.5; text-decoration: underline; overflow-wrap: anywhere; }
 .original-card .product-info > .product-meta { display: block; }
+.original-status { white-space: nowrap; font-weight: 600; }
 .shine-button { width: 100%; margin-top: 8px; background: var(--bg); color: var(--ink); border-color: var(--ink); }
 .shine-button:hover, .shine-button[aria-pressed="true"] { background: var(--ink); color: var(--bg); }
 .original-art-image { background: transparent; border: 0; }
@@ -133,6 +134,9 @@
 .view-products { width: 100%; margin-top: 8px; }
 .product-count { color: var(--muted); font-size: 12px; white-space: nowrap; }
 .product-choice-label { display: block; margin: 16px 0 6px; color: var(--muted); font-size: 12px; }
+.shipping-country-label { display: grid; gap: 6px; min-width: 0; color: var(--muted); font-size: 12px; }
+.shipping-country-label select { color: var(--ink); font-size: 14px; }
+.international-shipping-note { margin: 4px 0; color: var(--muted); font-size: 12px; line-height: 1.55; overflow-wrap: anywhere; }
 .variant-buttons { display: flex; flex-wrap: wrap; gap: 8px; }
 .variant-button { background: var(--bg); color: var(--ink); border-color: var(--line); text-transform: none; letter-spacing: 0; }
 .variant-button:hover, .variant-button.active { background: var(--ink); color: var(--bg); border-color: var(--ink); }
@@ -155,6 +159,9 @@
 .product-thumbnail img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .empty-preview { aspect-ratio: 1 / 1.1; border: 1px solid var(--line); background: var(--soft); display: grid; place-items: center; padding: 20px; color: var(--muted); text-align: center; }
 .compact-grid { grid-template-columns: 1.5fr .75fr .9fr; }
+.checkout-form .compact-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.checkout-form .compact-grid > [name="city"] { grid-column: 1 / -1; }
+@media(max-width:680px) { .checkout-form .compact-grid { grid-template-columns: 1fr; } }
 select { width: 100%; border: 1px solid var(--line); background: var(--bg); padding: 12px; border-radius: 0; font: inherit; }
 select:focus { outline: 1px solid var(--ink); }
 @media(max-width:680px) { .print-dialog { padding: 18px; } .compact-grid { grid-template-columns: 1fr; } }

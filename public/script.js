@@ -19,6 +19,71 @@ function responsiveImage(url, title, attributes = "") {
 
 const US_STATE_OPTIONS = `<option value="">State</option><option value="AL">Alabama</option><option value="AK">Alaska</option><option value="AZ">Arizona</option><option value="AR">Arkansas</option><option value="CA">California</option><option value="CO">Colorado</option><option value="CT">Connecticut</option><option value="DE">Delaware</option><option value="FL">Florida</option><option value="GA">Georgia</option><option value="HI">Hawaii</option><option value="ID">Idaho</option><option value="IL">Illinois</option><option value="IN">Indiana</option><option value="IA">Iowa</option><option value="KS">Kansas</option><option value="KY">Kentucky</option><option value="LA">Louisiana</option><option value="ME">Maine</option><option value="MD">Maryland</option><option value="MA">Massachusetts</option><option value="MI">Michigan</option><option value="MN">Minnesota</option><option value="MS">Mississippi</option><option value="MO">Missouri</option><option value="MT">Montana</option><option value="NE">Nebraska</option><option value="NV">Nevada</option><option value="NH">New Hampshire</option><option value="NJ">New Jersey</option><option value="NM">New Mexico</option><option value="NY">New York</option><option value="NC">North Carolina</option><option value="ND">North Dakota</option><option value="OH">Ohio</option><option value="OK">Oklahoma</option><option value="OR">Oregon</option><option value="PA">Pennsylvania</option><option value="RI">Rhode Island</option><option value="SC">South Carolina</option><option value="SD">South Dakota</option><option value="TN">Tennessee</option><option value="TX">Texas</option><option value="UT">Utah</option><option value="VT">Vermont</option><option value="VA">Virginia</option><option value="WA">Washington</option><option value="WV">West Virginia</option><option value="WI">Wisconsin</option><option value="WY">Wyoming</option>`;
 
+function shippingAddressFields() {
+  return `<input name="name" type="text" placeholder="Full name" autocomplete="shipping name" required /><input name="email" type="email" placeholder="Email for receipt" autocomplete="email" required /><input name="phone" type="tel" placeholder="Phone with country code (optional in US)" aria-label="Delivery phone with country code" autocomplete="shipping tel" /><label class="shipping-country-label">Country<select name="country" autocomplete="shipping country" required><option value="US">United States</option></select></label><input name="address1" type="text" placeholder="Address" autocomplete="shipping address-line1" required /><input name="address2" type="text" placeholder="Apartment, suite, etc. (optional)" autocomplete="shipping address-line2" /><div class="form-grid compact-grid"><input name="city" type="text" placeholder="City" autocomplete="shipping address-level2" required /><span data-shipping-region><select name="state" aria-label="State or province" autocomplete="shipping address-level1" required>${US_STATE_OPTIONS}</select></span><input name="postalCode" type="text" placeholder="ZIP code" aria-label="Postal code" autocomplete="shipping postal-code" required /></div><p class="international-shipping-note" data-international-notice hidden>Prices and checkout are in USD. Customs duties, import taxes, or carrier handling fees may be payable separately on delivery.</p>`;
+}
+
+let shippingCountriesRequest;
+function loadShippingCountries() {
+  if (!shippingCountriesRequest) shippingCountriesRequest = fetchJson(`${API}/api/shipping/countries`).catch((error) => { shippingCountriesRequest = null; throw error; });
+  return shippingCountriesRequest;
+}
+
+function attachShippingDestination(form) {
+  const countrySelect = form.elements.country;
+  let countries = [];
+  const updateRegion = (preserve = false) => {
+    const country = countries.find((item) => item.code === countrySelect.value);
+    const requiredRegion = ["US", "CA", "AU"].includes(countrySelect.value);
+    const previous = preserve ? form.elements.state.value : "";
+    const region = form.querySelector("[data-shipping-region]");
+    if (country?.states.length || countrySelect.value === "US") {
+      const options = country?.states.length
+        ? `<option value="">State / province${requiredRegion ? "" : " (optional)"}</option>${country.states.map((state) => `<option value="${escapeHtml(state.code)}">${escapeHtml(state.name)}</option>`).join("")}`
+        : US_STATE_OPTIONS;
+      region.innerHTML = `<select name="state" aria-label="State or province" autocomplete="shipping address-level1" ${requiredRegion ? "required" : ""}>${options}</select>`;
+    } else {
+      region.innerHTML = `<input name="state" type="text" placeholder="Region (optional)" aria-label="State or region" autocomplete="shipping address-level1" />`;
+    }
+    form.elements.state.value = previous;
+    form.elements.postalCode.required = country?.postalCodeRequired ?? requiredRegion;
+    form.elements.postalCode.placeholder = countrySelect.value === "US" ? "ZIP code" : form.elements.postalCode.required ? "Postal code" : "Postal code (if applicable)";
+    form.elements.phone.required = countrySelect.value !== "US";
+    form.elements.phone.placeholder = countrySelect.value === "US" ? "Phone with country code (optional)" : "Phone with country code, e.g. +44 7700 900123";
+    form.querySelector("[data-international-notice]").hidden = countrySelect.value === "US";
+    const taxField = form.querySelector('[name="taxNumber"]');
+    taxField.hidden = countrySelect.value !== "BR";
+    taxField.disabled = countrySelect.value !== "BR";
+    taxField.required = countrySelect.value === "BR";
+  };
+  const updateCountries = () => {
+    const previous = countrySelect.value;
+    const available = form.dataset.fulfillmentType === "self" ? countries.filter((country) => country.code === "US") : countries;
+    if (available.length) countrySelect.innerHTML = available.map((country) => `<option value="${escapeHtml(country.code)}">${escapeHtml(country.name)}</option>`).join("");
+    countrySelect.value = available.some((country) => country.code === previous) ? previous : "US";
+    updateRegion(previous === countrySelect.value);
+    if (previous !== countrySelect.value) form.dispatchEvent(new Event("change"));
+  };
+  countrySelect.addEventListener("change", () => updateRegion());
+  form.addEventListener("quoteinvalidated", updateCountries);
+  const taxField = document.createElement("input");
+  taxField.name = "taxNumber";
+  taxField.type = "text";
+  taxField.placeholder = "Recipient CPF or CNPJ (Brazil)";
+  taxField.setAttribute("aria-label", "Recipient CPF or CNPJ tax ID for Brazil");
+  taxField.hidden = true;
+  taxField.disabled = true;
+  form.querySelector("[data-international-notice]").before(taxField);
+  loadShippingCountries().then((data) => {
+    if (!form.isConnected) return;
+    countries = data.countries;
+    updateCountries();
+  }).catch(() => {
+    // Keep domestic checkout usable if country metadata is temporarily unavailable.
+    if (form.isConnected) countrySelect.options[0].textContent = "United States (international destinations temporarily unavailable)";
+  });
+}
+
 function timeRemaining(endsAt) {
   const diff = new Date(endsAt) - new Date();
   if (diff <= 0) return "Auction ended";
@@ -89,14 +154,14 @@ async function renderOriginals() {
     grid.innerHTML = originals.map((art) => {
       const isAvailable = ["active", "payment_pending"].includes(art.status);
       const inquirySubject = `Purchase inquiry: ${art.title}`;
-      const inquiryBody = `Hi Rayan,\n\nI'm interested in purchasing "${art.title}" (${art.size}, ${art.medium}), listed at ${money(art.price)}.\n\nCould you confirm availability and the total including shipping?\n\nThank you,\n`;
+      const inquiryBody = `Hi Rayan,\n\nI'm interested in purchasing "${art.title}" (${art.size}, ${art.medium}).\n\nCould you confirm availability, pricing, and shipping?\n\nThank you,\n`;
       const inquiryUrl = `mailto:${inquiryEmail}?subject=${encodeURIComponent(inquirySubject)}&body=${encodeURIComponent(inquiryBody)}`;
 
       return `
         <article class="product-card original-card" data-original-id="${escapeHtml(art.id)}">
           ${artworkImage(art, "original-art-image", art.revealImageUrl ? `data-standard-image="${escapeHtml(art.imageUrl)}" data-reveal-image="${escapeHtml(art.revealImageUrl)}"` : "")}
           <div class="product-info">
-            <div class="product-title-row"><h3>${escapeHtml(art.title)}</h3><span class="price">${art.status === "sold" ? (Number(art.price) > 0 ? `Sold · ${money(art.price)}` : "Sold") : money(art.price)}</span></div>
+            <div class="product-title-row"><h3>${escapeHtml(art.title)}</h3>${art.status === "sold" ? '<span class="original-status">Sold</span>' : ""}</div>
             <p class="product-meta">${escapeHtml(art.medium)} · ${escapeHtml(art.size)} · ${escapeHtml(art.year)}</p>
             <p>${escapeHtml(art.description)}</p>
           </div>
@@ -171,7 +236,7 @@ function attachArtworkPurchaseHandlers(artworks) {
       const sizeButtons = (products, selectedId) => products.map((product) => { const available = product.stockQuantity === null ? null : Math.max(Number(product.stockQuantity) - Number(product.stockReserved || 0), 0); const stock = available === null ? "" : available > 0 ? ` · ${available} available` : " · Sold out"; return `<button type="button" class="variant-button ${product.id === selectedId ? "active" : ""}" data-product-id="${escapeHtml(product.id)}" ${available === 0 ? "disabled" : ""}>${escapeHtml(product.sizes || product.title)} · ${money(product.price)}${stock}</button>`; }).join("");
       const optionSummary = (product) => (product.printfulOptions || []).map((option) => `<span class="product-option">${escapeHtml(option.id.replaceAll("_", " "))}: ${escapeHtml(option.value)}</span>`).join("");
       const content = dialog.querySelector("#printDialogContent");
-      content.innerHTML = `<div class="dialog-heading"><p class="section-label">${artwork.products.length} options available</p><h2 id="printDialogTitle">${escapeHtml(artwork.title)}</h2><p>${escapeHtml(artwork.description || "Made-to-order products fulfilled through Printful.")}</p><label class="product-choice-label" for="productChoice">Choose a product type</label><select id="productChoice" class="product-choice">${typeOptions}</select><label class="product-choice-label">Choose a size</label><div class="variant-buttons" data-variant-buttons>${sizeButtons(typeProducts(firstType), firstProduct.id)}</div><div class="product-options" data-product-options>${optionSummary(firstProduct)}</div><p class="dialog-price selected-product-price">${money(firstProduct.price)} before shipping</p></div><form class="checkout-form" data-id="${firstProduct.id}"><input name="name" type="text" placeholder="Full name" required /><input name="email" type="email" placeholder="Email for receipt" required /><input name="address1" type="text" placeholder="Address" required /><input name="address2" type="text" placeholder="Apartment, suite, etc. (optional)" /><div class="form-grid compact-grid"><input name="city" type="text" placeholder="City" required /><select name="state" required>${US_STATE_OPTIONS}</select><input name="postalCode" type="text" placeholder="ZIP code" required /></div><input name="country" type="text" value="US" placeholder="Country" required /><button type="button" class="quote-shipping">Calculate shipping</button><button type="submit" disabled>Continue to Stripe</button></form><p class="notice" id="notice-${firstProduct.id}">Enter your mailing address to see live Printful shipping.</p>`;
+      content.innerHTML = `<div class="dialog-heading"><p class="section-label">${artwork.products.length} options available</p><h2 id="printDialogTitle">${escapeHtml(artwork.title)}</h2><p>${escapeHtml(artwork.description || "Made-to-order products fulfilled through Printful.")}</p><label class="product-choice-label" for="productChoice">Choose a product type</label><select id="productChoice" class="product-choice">${typeOptions}</select><label class="product-choice-label">Choose a size</label><div class="variant-buttons" data-variant-buttons>${sizeButtons(typeProducts(firstType), firstProduct.id)}</div><div class="product-options" data-product-options>${optionSummary(firstProduct)}</div><p class="dialog-price selected-product-price">${money(firstProduct.price)} before shipping</p></div><form class="checkout-form" data-id="${firstProduct.id}" data-fulfillment-type="${escapeHtml(firstProduct.fulfillmentType || "printful")}">${shippingAddressFields()}<button type="button" class="quote-shipping">Calculate shipping</button><button type="submit" disabled>Continue to Stripe</button></form><p class="notice" id="notice-${firstProduct.id}">Enter your mailing address to see live Printful shipping.</p>`;
       const form = content.querySelector(".checkout-form");
       const heading = content.querySelector(".dialog-heading");
       const notice = content.querySelector(".notice");
@@ -195,6 +260,7 @@ function attachArtworkPurchaseHandlers(artworks) {
       const selectProduct = (product) => {
         if (!product) return;
         form.dataset.id = product.id;
+        form.dataset.fulfillmentType = product.fulfillmentType || "printful";
         form.dispatchEvent(new Event("quoteinvalidated"));
         content.querySelector(".selected-product-price").textContent = `${money(product.price)} before shipping`;
         content.querySelector("[data-product-options]").innerHTML = optionSummary(product);
@@ -228,13 +294,8 @@ async function renderPrints() {
         ${artworkImage(item)}
         <div class="product-info"><div class="product-title-row"><h3>${item.title}</h3><span class="price">${money(item.price)}</span></div><p class="product-meta">${item.productType} · ${item.sizes}</p><p>${item.description}</p></div>
         <button type="button" class="purchase-print" data-id="${item.id}">Purchase print</button>
-        <form class="checkout-form" data-id="${item.id}">
-          <input name="name" type="text" placeholder="Full name" required />
-          <input name="email" type="email" placeholder="Email for receipt" required />
-          <input name="address1" type="text" placeholder="Address" required />
-          <input name="address2" type="text" placeholder="Apartment, suite, etc. (optional)" />
-          <div class="form-grid compact-grid"><input name="city" type="text" placeholder="City" required /><select name="state" required>${US_STATE_OPTIONS}</select><input name="postalCode" type="text" placeholder="ZIP code" required /></div>
-          <input name="country" type="text" value="US" placeholder="Country" required />
+        <form class="checkout-form" data-id="${item.id}" data-fulfillment-type="${escapeHtml(item.fulfillmentType || "printful")}">
+          ${shippingAddressFields()}
           <button type="button" class="quote-shipping">Calculate shipping</button>
           <button type="submit" disabled>Checkout</button>
         </form>
@@ -267,6 +328,7 @@ function attachPrintPurchaseHandlers(prints) {
 
 function attachPrintCheckoutHandlers(root = document) {
   root.querySelectorAll(".checkout-form").forEach((form) => {
+    if (!form.dataset.checkoutBound) attachShippingDestination(form);
     attachCheckoutHandler(form, "prints", form.parentElement.querySelector(".notice"));
   });
 }

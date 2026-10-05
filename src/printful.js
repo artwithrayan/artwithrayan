@@ -1,4 +1,27 @@
 const PRINTFUL_BASE_URL = "https://api.printful.com";
+let countriesCache = null;
+let countriesRequest = null;
+
+async function getShippingCountries() {
+  if (countriesCache && countriesCache.expires > Date.now()) return countriesCache.countries;
+  if (countriesRequest) return countriesRequest;
+  countriesRequest = (async () => {
+    // Country/address metadata is public and does not require store credentials.
+    const response = await fetch(`${PRINTFUL_BASE_URL}/countries`, { signal: AbortSignal.timeout(20000) });
+    if (!response.ok) throw new Error("Could not load shipping countries. Please try again.");
+    const data = await response.json();
+    if (!Array.isArray(data.result) || !data.result.length) throw new Error("Printful returned an invalid country list.");
+    const countries = data.result.filter((country) => /^[A-Z]{2}$/.test(country.code) && country.name).map((country) => ({
+      code: country.code, name: country.name,
+      states: Array.isArray(country.states) ? country.states.map(({ code, name }) => ({ code, name })) : []
+    }));
+    if (!countries.some((country) => country.code === "US")) throw new Error("Printful returned an incomplete country list.");
+    countriesCache = { countries, expires: Date.now() + 60 * 60 * 1000 };
+    return countries;
+  })();
+  try { return await countriesRequest; }
+  finally { countriesRequest = null; }
+}
 
 function getPrintfulToken() {
   return process.env.PRINTFUL_API_KEY || "";
@@ -163,12 +186,15 @@ async function getShippingRatesForPrint({ print, recipient, currency = "USD" }) 
   return toArray(data?.result || data?.data || data);
 }
 
-async function estimatePrintCosts({ print, recipient, shippingMethod = "STANDARD" }) {
+async function estimatePrintCosts({ print, recipient, shippingMethod = "STANDARD", retailPrice }) {
   const item = shippingRateItem(print);
   if (!item) throw new Error("This print is missing its Printful variant information.");
+  const retailCosts = recipient.country_code !== "US" && Number.isFinite(Number(retailPrice)) && Number(retailPrice) > 0
+    ? { currency: "USD", subtotal: Number(retailPrice).toFixed(2) } : undefined;
+  if (retailCosts) item.retail_price = retailCosts.subtotal;
   const data = await printfulFetch("/orders/estimate-costs", {
     method: "POST",
-    body: JSON.stringify({ shipping: shippingMethod, recipient, items: [item] })
+    body: JSON.stringify({ shipping: shippingMethod, recipient, items: [item], retail_costs: retailCosts })
   });
   return data?.result || data?.data || data;
 }
@@ -241,15 +267,20 @@ async function createDraftOrderFromStripeSession({ payment, print, stripeSession
   const recipient = {
     name,
     address1: storedRecipient?.address1 || address?.line1,
-    address2: storedRecipient?.address2 || address?.line2 || "",
+    address2: storedRecipient ? storedRecipient.address2 || "" : address?.line2 || "",
     city: storedRecipient?.city || address?.city,
-    state_code: storedRecipient?.state_code || address?.state || "",
+    state_code: storedRecipient ? storedRecipient.state_code || "" : address?.state || "",
     country_code: storedRecipient?.country_code || address?.country,
-    zip: storedRecipient?.zip || address?.postal_code
+    zip: storedRecipient ? storedRecipient.zip || "" : address?.postal_code || "",
+    phone: storedRecipient?.phone || stripeSession.customer_details?.phone || "",
+    email: storedRecipient?.email || payment.customer_email || stripeSession.customer_details?.email || "",
+    ...(storedRecipient?.country_code === "BR" && storedRecipient.tax_number ? { tax_number: storedRecipient.tax_number } : {})
   };
 
   let shippingJson = {};
   try { shippingJson = payment.shipping_json ? JSON.parse(payment.shipping_json) : {}; } catch { shippingJson = {}; }
+  const retailCosts = recipient.country_code !== "US" && Number.isFinite(Number(payment.subtotal_amount)) && Number(payment.subtotal_amount) > 0
+    ? { currency: "USD", subtotal: Number(payment.subtotal_amount).toFixed(2) } : undefined;
   const externalId = `rayan-payment-${payment.id}`;
   const findExisting = async () => {
     try {
@@ -276,13 +307,14 @@ async function createDraftOrderFromStripeSession({ payment, print, stripeSession
 
   if (print.printfulSyncVariantId) {
     const item = { sync_variant_id: Number(print.printfulSyncVariantId), quantity: 1 };
+    if (retailCosts) item.retail_price = retailCosts.subtotal;
     if (Array.isArray(print.printfulOptions) && print.printfulOptions.length) item.options = print.printfulOptions;
-    const payload = { external_id: externalId, shipping: shippingJson.method || undefined, recipient, items: [item] };
+    const payload = { external_id: externalId, shipping: shippingJson.method || undefined, recipient, items: [item], retail_costs: retailCosts };
     return createOrder(payload);
   }
 
   if (print.printfulVariantId && print.printFileUrl) {
-    const payload = { external_id: externalId, shipping: shippingJson.method || undefined, recipient, items: [{ variant_id: Number(print.printfulVariantId), quantity: 1, files: [{ url: print.printFileUrl }] }] };
+    const payload = { external_id: externalId, shipping: shippingJson.method || undefined, recipient, items: [{ variant_id: Number(print.printfulVariantId), quantity: 1, files: [{ url: print.printFileUrl }], ...(retailCosts ? { retail_price: retailCosts.subtotal } : {}) }], retail_costs: retailCosts };
     return createOrder(payload);
   }
 
@@ -290,4 +322,4 @@ async function createDraftOrderFromStripeSession({ payment, print, stripeSession
   return { skipped: true, reason: "Missing Printful sync variant data." };
 }
 
-module.exports = { printfulFetch, getStoreProducts, getStoreProductDetails, fetchPrintfulProductsForWebsite, configureWebhooks, getShippingRatesForPrint, estimatePrintCosts, createDraftOrderFromStripeSession };
+module.exports = { printfulFetch, getShippingCountries, getStoreProducts, getStoreProductDetails, fetchPrintfulProductsForWebsite, configureWebhooks, getShippingRatesForPrint, estimatePrintCosts, createDraftOrderFromStripeSession };
