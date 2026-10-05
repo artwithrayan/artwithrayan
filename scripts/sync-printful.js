@@ -6,7 +6,8 @@ const db = require("../src/db");
 async function main() {
   const syncData = await printful.fetchPrintfulProductsForWebsite();
   const results = db.upsertPrintfulPrints(syncData.importedProducts);
-  const archived = db.archiveMissingPrintfulPrints(syncData.importedProducts.map((item) => item.printfulSyncVariantId));
+  const archived = syncData.complete ? db.archiveMissingPrintfulPrints(syncData.importedProducts.map((item) => item.printfulSyncVariantId)) : 0;
+  if (!syncData.complete) console.warn("Catalog fetch was incomplete; existing listings were preserved.");
   const created = results.filter((item) => item.action === "created").length;
   const updated = results.filter((item) => item.action === "updated").length;
 

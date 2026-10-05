@@ -257,6 +257,15 @@ ensureColumn("payments", "tracking_url", "TEXT");
 ensureColumn("payments", "tracking_carrier", "TEXT");
 ensureColumn("payments", "tracking_service", "TEXT");
 ensureColumn("payments", "tracking_email_sent_at", "TEXT");
+ensureColumn("originals", "reservation_payment_id", "INTEGER");
+ensureColumn("payments", "checkout_expires_at", "INTEGER");
+ensureColumn("payments", "order_retry_at", "INTEGER NOT NULL DEFAULT 0");
+ensureColumn("payments", "order_retry_attempts", "INTEGER NOT NULL DEFAULT 0");
+ensureColumn("payments", "order_processing_error", "TEXT");
+ensureColumn("payments", "sheet_update_needed", "INTEGER NOT NULL DEFAULT 0");
+db.prepare(`UPDATE originals SET reservation_payment_id=(
+  SELECT id FROM payments WHERE original_id=originals.id AND status='pending' ORDER BY id DESC LIMIT 1
+) WHERE status='payment_pending' AND reservation_payment_id IS NULL`).run();
 
 function slugify(value) {
   return String(value || "")
@@ -575,12 +584,16 @@ function reserveOriginalCheckout(originalId) {
   return result.changes === 1;
 }
 
-function releaseOriginalCheckout(originalId) {
+function setOriginalReservationOwner(originalId, paymentId) {
+  db.prepare(`UPDATE originals SET reservation_payment_id=? WHERE id=? AND status='payment_pending' AND reservation_payment_id IS NULL`).run(paymentId, originalId);
+}
+
+function releaseOriginalCheckout(originalId, paymentId = null) {
   const result = db.prepare(`
     UPDATE originals
-    SET status='active', updated_at=CURRENT_TIMESTAMP
-    WHERE id=? AND is_active=1 AND status='payment_pending'
-  `).run(originalId);
+    SET status='active', reservation_payment_id=NULL, updated_at=CURRENT_TIMESTAMP
+    WHERE id=? AND is_active=1 AND status='payment_pending' AND reservation_payment_id IS ?
+  `).run(originalId, paymentId);
   return result.changes === 1;
 }
 
@@ -1029,10 +1042,10 @@ function createPayment({
     checkoutUrl,
     customerName,
     customerEmail,
-    Math.round(finalSubtotal || 0),
-    Math.round(shippingAmount || 0),
-    Math.round(finalTotal || amount || 0),
-    Math.round(amount),
+    Math.round(Number(finalSubtotal || 0) * 100) / 100,
+    Math.round(Number(shippingAmount || 0) * 100) / 100,
+    Math.round(Number(finalTotal || amount || 0) * 100) / 100,
+    Math.round(Number(amount) * 100) / 100,
     shippingJson ? JSON.stringify(shippingJson) : null,
     status,
     failureReason
@@ -1084,12 +1097,78 @@ function getPaymentById(id) {
   return db.prepare(`SELECT * FROM payments WHERE id=?`).get(id);
 }
 
-function setPaymentCheckoutSession(paymentId, stripeSessionId, checkoutUrl) {
+function setPaymentCheckoutSession(paymentId, stripeSessionId, checkoutUrl, expiresAt = null) {
   db.prepare(`
     UPDATE payments
-    SET stripe_session_id=?, checkout_url=?
+    SET stripe_session_id=?, checkout_url=?, checkout_expires_at=COALESCE(?,checkout_expires_at)
     WHERE id=?
-  `).run(stripeSessionId, checkoutUrl, paymentId);
+  `).run(stripeSessionId, checkoutUrl, expiresAt, paymentId);
+}
+
+const confirmCheckoutPayment = db.transaction((session) => {
+  const payment = getPaymentByStripeSessionId(session.id);
+  if (!payment) throw new Error("Payment record not found.");
+  if (["paid", "refund_pending", "refunded"].includes(payment.status)) return payment;
+  if (session.payment_status !== "paid") return payment;
+  if (session.currency !== "usd" || !Number.isInteger(session.amount_total) || session.amount_total <= 0) throw new Error("Invalid paid checkout amount or currency.");
+  let conflict = false;
+  if (payment.kind === "original") {
+    const art = db.prepare(`SELECT status,reservation_payment_id FROM originals WHERE id=?`).get(payment.original_id);
+    conflict = !art || Boolean(getPaidPaymentForOriginal(payment.original_id)) ||
+      !(art.status === "active" || (art.status === "payment_pending" && art.reservation_payment_id === payment.id));
+    if (!conflict) db.prepare(`UPDATE originals SET status='sold', reservation_payment_id=NULL, updated_at=CURRENT_TIMESTAMP WHERE id=?`).run(payment.original_id);
+  } else if (payment.kind === "print") {
+    const print = getPrintById(payment.print_id);
+    if (print?.fulfillmentType === "self" && print.stockQuantity !== null) {
+      conflict = payment.status !== "pending" || !finalizePrintStockReservation(print.id);
+    }
+  }
+  db.prepare(`UPDATE payments SET status=?,paid_at=CURRENT_TIMESTAMP,stripe_payment_intent_id=?,total_amount=?,amount=?,
+    failure_reason=?,order_retry_at=0,sheet_update_needed=1 WHERE id=?`).run(
+    conflict ? "refund_pending" : "paid", typeof session.payment_intent === "object" ? session.payment_intent.id : session.payment_intent,
+    session.amount_total / 100, session.amount_total / 100,
+    conflict ? "Inventory was unavailable when payment completed; refund required." : null, payment.id
+  );
+  return getPaymentById(payment.id);
+});
+
+const cancelCheckoutReservation = db.transaction((sessionId) => {
+  const payment = getPaymentByStripeSessionId(sessionId);
+  if (!payment || payment.status !== "pending") return false;
+  if (payment.kind === "original") releaseOriginalCheckout(payment.original_id, payment.id);
+  if (payment.kind === "print") {
+    const print = getPrintById(payment.print_id);
+    if (print?.fulfillmentType === "self") releasePrintStockReservation(payment.print_id);
+  }
+  markPaymentCancelled(sessionId);
+  return true;
+});
+
+function getPendingCheckoutPayments() {
+  return db.prepare(`SELECT * FROM payments WHERE status='pending' AND stripe_session_id NOT LIKE 'pending-%'
+    AND (checkout_expires_at <= ? OR (checkout_expires_at IS NULL AND created_at < datetime('now','-30 minutes')))
+    ORDER BY id LIMIT 20`).all(Math.floor(Date.now() / 1000));
+}
+
+function getPaymentsNeedingProcessing({ sheetsEnabled = false } = {}) {
+  return db.prepare(`SELECT payments.* FROM payments LEFT JOIN prints ON prints.id=payments.print_id
+    WHERE payments.status IN ('paid','refund_pending','refunded') AND order_retry_at <= ? AND (
+      payments.status='refund_pending' OR (payments.status='paid' AND kind='print' AND COALESCE(prints.fulfillment_type,'printful')='printful' AND printful_order_id IS NULL)
+      OR (? AND (google_sheets_synced_at IS NULL OR sheet_update_needed=1))
+      OR (payments.status='paid' AND tracking_email_sent_at IS NULL AND (tracking_number != '' OR tracking_url != ''))
+    ) ORDER BY order_retry_at,id LIMIT 20`).all(Date.now(), sheetsEnabled ? 1 : 0);
+}
+
+function setOrderProcessingResult(paymentId, errors = []) {
+  const payment = getPaymentById(paymentId);
+  const attempts = errors.length ? payment.order_retry_attempts + 1 : 0;
+  const delay = Math.min(3600000, 30000 * 2 ** Math.min(attempts - 1, 7));
+  db.prepare(`UPDATE payments SET order_retry_attempts=?,order_retry_at=?,order_processing_error=? WHERE id=?`)
+    .run(attempts, errors.length ? Date.now() + delay : 0, errors.length ? errors.join("; ").slice(0, 2000) : null, paymentId);
+}
+
+function markPaymentRefunded(paymentId) {
+  db.prepare(`UPDATE payments SET status='refunded',sheet_update_needed=1 WHERE id=?`).run(paymentId);
 }
 
 function markPaymentPaid(stripeSessionId) {
@@ -1120,14 +1199,12 @@ function releaseStaleCheckoutReservations() {
   const stalePayments = db.prepare(`
     SELECT id, kind, original_id, print_id, stripe_session_id
     FROM payments
-    WHERE status='pending' AND created_at < datetime('now', '-30 minutes')
+    WHERE status='pending' AND stripe_session_id LIKE 'pending-%' AND created_at < datetime('now', '-30 minutes')
   `).all();
 
   const release = db.transaction((payments) => {
     for (const payment of payments) {
-      if (payment.kind === "print" && payment.print_id) releasePrintStockReservation(payment.print_id);
-      if (payment.kind === "original" && payment.original_id) releaseOriginalCheckout(payment.original_id);
-      markPaymentCancelled(payment.stripe_session_id);
+      cancelCheckoutReservation(payment.stripe_session_id);
     }
   });
   release(stalePayments);
@@ -1137,7 +1214,7 @@ function releaseStaleCheckoutReservations() {
 function setPaymentPrintfulOrderId(paymentId, printfulOrderId) {
   db.prepare(`
     UPDATE payments
-    SET printful_order_id=?
+    SET printful_order_id=?,sheet_update_needed=1
     WHERE id=?
   `).run(printfulOrderId, paymentId);
 }
@@ -1145,7 +1222,7 @@ function setPaymentPrintfulOrderId(paymentId, printfulOrderId) {
 function markPaymentGoogleSheetsSynced(paymentId) {
   db.prepare(`
     UPDATE payments
-    SET google_sheets_synced_at=CURRENT_TIMESTAMP
+    SET google_sheets_synced_at=CURRENT_TIMESTAMP,sheet_update_needed=0
     WHERE id=?
   `).run(paymentId);
 }
@@ -1162,9 +1239,10 @@ function getPaymentByPrintfulOrderId(printfulOrderId) {
 function setPaymentTracking(paymentId, { number = "", url = "", carrier = "", service = "" }) {
   db.prepare(`
     UPDATE payments
-    SET tracking_number=?, tracking_url=?, tracking_carrier=?, tracking_service=?
+    SET tracking_email_sent_at=CASE WHEN tracking_number != ? OR tracking_url != ? THEN NULL ELSE tracking_email_sent_at END,
+        tracking_number=?, tracking_url=?, tracking_carrier=?, tracking_service=?,order_retry_at=0
     WHERE id=?
-  `).run(number, url, carrier, service, paymentId);
+  `).run(number, url, number, url, carrier, service, paymentId);
 }
 
 function markPaymentTrackingEmailSent(paymentId) {
@@ -1203,6 +1281,7 @@ module.exports = {
   getSecondHighestBid,
   markOriginalStatus,
   reserveOriginalCheckout,
+  setOriginalReservationOwner,
   releaseOriginalCheckout,
   updateOriginalEndsAt,
   createOriginalArtwork,
@@ -1240,6 +1319,12 @@ module.exports = {
   getPaymentByStripeSessionId,
   getPaymentById,
   setPaymentCheckoutSession,
+  confirmCheckoutPayment,
+  cancelCheckoutReservation,
+  getPendingCheckoutPayments,
+  getPaymentsNeedingProcessing,
+  setOrderProcessingResult,
+  markPaymentRefunded,
   markPaymentPaid,
   markPaymentCancelled,
   markPaymentFailed,

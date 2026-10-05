@@ -1,256 +1,110 @@
-# Rayan Rao Art — automatic auction charging version
+# Rayan Rao Art
 
-This version changes the auction flow so bidders must register before bidding, save a payment method through Stripe, and authorize automatic charging if they win.
+Fixed-price original paintings and Printful products, with Stripe Checkout, SQLite order storage, Google Sheets reporting, and shipment tracking emails. Auction and admin endpoints are disabled. Print Club is coming soon.
 
-## What changed
+## Local Development
 
-- `/register.html` requires:
-  - name
-  - email address for receipts
-  - shipping address
-  - auction terms checkbox
-  - automatic winner-charge authorization checkbox
-  - Stripe setup-mode payment-method verification
-- Bidding requires a registered, approved email.
-- When an auction ends, the server checks ended auctions and automatically charges the highest bidder.
-- The charge includes:
-  - winning bid amount
-  - estimated shipping/packaging charge
-- Stripe sends the customer receipt after a successful charge; Resend is reserved for shipment tracking.
-- Admin page shows bidders, shipping estimate, charge status, and a force-charge button for Stripe test mode.
-
-## Run locally
-
-```bash
-npm install
+```powershell
+npm ci
+npm test
 npm run dev
 ```
 
-Open:
+Open http://localhost:3000. Use Stripe test credentials locally. Do not copy live credentials into test fixtures.
 
-```text
-http://localhost:3000
-```
+## Production Configuration
 
-## Required `.env`
-
-Copy your existing `.env` into this folder, then make sure it has:
+Set these on the Render service, not in Git:
 
 ```env
-PORT=3000
-BASE_URL=http://localhost:3000
-ADMIN_SECRET=rayan-test-admin-12345
-
-STRIPE_SECRET_KEY=sk_test_your_key_here
-STRIPE_WEBHOOK_SECRET=whsec_your_webhook_secret_here
-STRIPE_PRINT_CLUB_PRICE_ID=price_your_monthly_9_usd_price
-
-RESEND_API_KEY=re_your_key_here
-FROM_EMAIL=Rayan Rao Art <onboarding@resend.dev>
-
-PRINTFUL_API_KEY=your_printful_api_key
-PRINTFUL_WEBHOOK_SECRET=use_a_long_random_secret
-PRINTFUL_WEBHOOK_URL=https://your-render-site.onrender.com/api/printful/webhook?token=use_a_long_random_secret
+BASE_URL=https://artwithrayan.com
+DB_PATH=/var/data/data.sqlite
+STRIPE_SECRET_KEY=your_live_stripe_key
+STRIPE_WEBHOOK_SECRET=your_production_endpoint_signing_secret
+PRINTFUL_API_KEY=your_printful_token
+PRINTFUL_AUTO_CREATE_DRAFT_ORDER=true
+PRINTFUL_SYNC_ON_STARTUP=true
+PRINTFUL_SYNC_INTERVAL_MS=900000
+PRINTFUL_WEBHOOK_SECRET=your_existing_random_secret
+PRINTFUL_WEBHOOK_URL=https://artwithrayan.com/api/printful/webhook?token=your_existing_random_secret
 PRINTFUL_WEBHOOK_ON_STARTUP=false
-PRINTFUL_SYNC_ON_STARTUP=false
 PRINT_CLUB_ENABLED=false
-
-AUTO_CHARGE_AUCTIONS=true
-AUCTION_PROCESS_INTERVAL_MS=60000
+RESEND_API_KEY=your_resend_key
+FROM_EMAIL=Rayan Rao Art <shipping@artwithrayan.com>
+GOOGLE_SHEETS_SPREADSHEET_ID=your_sheet_id
+GOOGLE_SHEETS_RANGE=Sheet1!A:AC
+GOOGLE_SERVICE_ACCOUNT_EMAIL=your_service_account_email
+GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY=your_service_account_private_key
 ```
 
-## Stripe webhook is required
+Attach a persistent disk at /var/data. The database, retry state, reservations, shipping addresses, and order records must survive deploys. Keep SQLite backups; Google Sheets is an order report, not a complete database backup.
 
-Automatic bidder approval requires the Stripe webhook while testing locally:
+### Resend Setup Still Requires Dashboard And DNS Changes
 
-```bash
+1. Add artwithrayan.com (or a sending subdomain) in Resend.
+2. Add the DNS records Resend provides in Namecheap and wait for verification.
+3. Set FROM_EMAIL on Render to an address on that verified domain.
+4. Send a test shipment email to an address other than the Resend account owner's email.
+
+The address above is an example only; it does not automatically verify the domain or create a mailbox. The code refuses onboarding@resend.dev for customer tracking, retains unsuccessful sends, and retries them. Changing source code cannot complete DNS verification. /api/health reports trackingEmailReady for basic sender/key configuration; successful delivery still needs verification with Resend.
+
+## Webhooks
+
+Stripe destination URL:
+
+```text
+https://artwithrayan.com/api/stripe/webhook
+```
+
+Subscribe to checkout.session.completed and checkout.session.expired. For older delayed-payment sessions, also subscribe to checkout.session.async_payment_succeeded and checkout.session.async_payment_failed. New original/print checkouts use card payments only, including supported card wallets. Never acknowledge an unpaid checkout as paid. Webhooks fail closed if the signing secret is missing.
+
+Local testing:
+
+```powershell
 stripe listen --forward-to localhost:3000/api/stripe/webhook
 ```
 
-Paste the `whsec_...` value into `.env` as `STRIPE_WEBHOOK_SECRET`, restart `npm run dev`, and keep the Stripe CLI terminal running. The production Stripe endpoint should receive `checkout.session.completed` and `checkout.session.expired`.
+Use the CLI's signing secret locally, not on Render. The deployed endpoint uses its own destination signing secret.
 
-## Printful shipment tracking emails
+Printful sends package_shipped to /api/printful/webhook with the configured token. Set PRINTFUL_WEBHOOK_ON_STARTUP=true for one setup deploy, then false. Existing secrets do not need to change for these code fixes. Do not publish keys, tokens, or full token-bearing webhook URLs.
 
-When Printful sends a `package_shipped` event, the server records the carrier, service, tracking number, and tracking URL for the matching paid order, then sends the customer a tracking email through Resend. The shipment webhook is authenticated with the token in `PRINTFUL_WEBHOOK_SECRET`.
+## Order Recovery
 
-For a Render deployment, add the Printful variables above. Set `PRINTFUL_WEBHOOK_ON_STARTUP=true` for one deploy so the server registers the webhook with Printful, confirm the Render logs show `[printful webhook setup] configured`, then change it back to `false` and redeploy. Keep `PRINTFUL_WEBHOOK_URL` and `PRINTFUL_WEBHOOK_SECRET` unchanged after setup.
+Paid orders are saved before integrations run. A worker checks persisted pending work every minute and on startup. Printful, Sheets, and tracking attempts are independent; failures back off from 30 seconds to a maximum of one hour and remain recorded in the database.
 
-## How automatic charging works
+- Printful looks up the stable external order ID before creating a draft and recovers accepted requests whose responses were lost.
+- Stripe refund state is checked before replaying unfulfilled historical orders. Refunded orders are not sent to Printful.
+- Google Sheets checks for the order ID before every append, including after a lost response. Customer strings use RAW mode; money is numeric with cents preserved.
+- Tracking uses a stable shipment-specific email idempotency key. Rejected emails are not marked sent.
+- Expiration only cancels a pending checkout's own reservation. Cleanup verifies real Stripe session status before releasing it.
+- A late payment conflicting with another reservation is queued for an idempotent refund rather than selling the original twice.
 
-1. Bidder registers on `/register.html`.
-2. Stripe saves a payment method in setup mode.
-3. The webhook stores the Stripe payment method ID and approves the bidder.
-4. Bidder places bids using the registered email.
-5. When the auction end time passes, the Node server checks ended auctions every 60 seconds.
-6. The server finds the highest bid.
-7. The server calculates shipping/packaging.
-8. The server creates and confirms a Stripe PaymentIntent using the saved payment method with `off_session: true`.
-9. If payment succeeds, the artwork becomes `sold` and Stripe sends the customer receipt.
-10. If payment fails or requires authentication, the artwork becomes `auto_charge_failed` for review.
+Printful orders remain drafts: these changes do not automatically confirm production or charge your Printful wallet. Monitor the service logs for [orders] retry failures and review your Printful drafts. Refunding in Stripe does not cancel an existing Printful order or automatically relist an original; do those separately when appropriate.
 
-## Shipping estimate logic
+Historical totals rounded by older versions are not recoverable from the database alone. Reconcile those records with Stripe before relying on past profit figures. Estimated profit is not accounting profit: actual postage, materials, labor, original production costs, refunds, and actual Stripe fees may differ.
 
-Shipping is estimated in `src/shipping.js` from:
+## Catalog And Shipping
 
-- artwork dimensions parsed from the size string or stored width/height/depth
-- estimated artwork weight
-- packaging type
-- protective materials
-- packing labor
-- carrier-cost buffer
-- oversized/dimensional adjustments
+With a Printful key configured, the server refreshes products every 15 minutes by default. Set PRINTFUL_SYNC_INTERVAL_MS=0 to disable periodic refresh. Failed partial imports never archive existing listings. A completed refresh archives missing variants. Initial import can be enabled with PRINTFUL_SYNC_ON_STARTUP=true.
 
-This is not a live USPS/UPS/FedEx quote. It is a predictable internal estimate.
+Manual import:
 
-## Testing automatic charging
-
-Use Stripe test card:
-
-```text
-4242 4242 4242 4242
+```powershell
+npm run sync:printful
 ```
 
-For a quick test, register a bidder, place a bid, then go to:
+Printful shipping/tax is estimated from its API for the selected variant and address. Originals and self-fulfilled products use the internal dimension/weight/packaging estimate in src/shipping.js, not a live UPS rate. Changing a variant or address invalidates the quote. If the total changes before checkout, the buyer must request a new quote.
 
-```text
-http://localhost:3000/admin.html
+## Images And Tests
+
+Responsive WebP assets are checked in, with content-hashed filenames and long cache lifetimes. Source photographs are preserved. Gallery images load lazily; the homepage image uses higher loading priority. To regenerate after replacing source images, install or provide Sharp to scripts/optimize-images.cjs (IMAGE_TOOLS_MODULES can point to the bundled Node modules directory).
+
+npm test runs isolated synthetic-database and mocked-provider regression tests. It does not create real payments, fulfillment orders, or customer emails. tests/check-browser.cjs additionally verifies desktop/mobile pages and changing quotes with bundled Playwright.
+
+Export orders:
+
+```powershell
+npm run export:orders
 ```
 
-Click:
-
-```text
-Force auto-charge winner now
-```
-
-Use this only in Stripe test mode.
-
-## Before public launch
-
-You still need:
-
-- real legal auction terms
-- privacy policy
-- refund/shipping policy
-- production database
-- deployed HTTPS site
-- real domain verified in Resend
-- stronger admin protection
-- optional bidder deposit
-- real carrier-rate integration if you want exact shipping by destination
-
-
-## Manual auction controls
-
-The admin page now includes direct auction controls:
-
-- **End Bidding Now**: closes bidding immediately and charges the current highest bidder using their saved Stripe payment method. If there are no bids, the auction is marked `ended_no_bids` and no one is charged.
-- **Cancel Auction**: closes bidding without charging anyone. The status becomes `cancelled`.
-- **Reopen Auction**: changes the status back to `active`. If the original end time is already in the past, the system extends the auction by 7 days automatically.
-- **Charge Second-Highest**: fallback option for a failed/non-paying winner. It charges the second-highest bidder using the same bid + estimated shipping/packaging logic.
-- **Fallback: Manual Checkout**: creates a Stripe checkout link instead of using the saved payment method.
-
-Use `End Bidding Now` when you want to manually close an auction before the timer. Use `Cancel Auction` if you want bidding to stop but do not want to sell the piece.
-
-
-## Stripe receipts and Resend shipment tracking
-
-This version makes shipping/packaging visible before a bidder places a bid.
-
-On `originals.html`, each artwork shows:
-
-- Current bid
-- Estimated shipping/packaging
-- Estimated total if current bid wins
-- Live estimated total when the buyer types a new bid
-- A confirmation popup before the bid is submitted
-
-When the auction is ended manually or automatically, the winner is charged:
-
-```text
-winning bid + displayed estimated shipping/packaging
-```
-
-Stripe sends the payment receipt directly to the email entered at checkout. Purchase webhooks record the paid order without sending a second Resend confirmation.
-
-### Resend setup
-
-Add your Resend key to `.env`:
-
-```env
-RESEND_API_KEY=re_your_actual_key_here
-FROM_EMAIL=Rayan Rao Art <onboarding@resend.dev>
-```
-
-Then restart the server:
-
-```bash
-npm run dev
-```
-
-For production, verify your own domain in Resend and change `FROM_EMAIL` to something like:
-
-```env
-FROM_EMAIL=Rayan Rao Art <hello@yourdomain.com>
-```
-
-Resend is called only after Printful reports a tracked shipment. Stripe receipts do not use the Resend quota.
-
-
-## Production-readiness iteration: real artwork workflow
-
-This version adds an admin Artwork Manager so originals can be added and edited without changing code.
-
-### Add a real original painting
-
-1. Run the site locally.
-2. Open `http://localhost:3000/admin.html`.
-3. Enter your `ADMIN_SECRET`.
-4. Fill out the Artwork Manager form:
-   - title
-   - medium
-   - size
-   - year
-   - description
-   - image URL
-   - starting bid
-   - bid increment
-   - auction end date/time
-   - width/height/depth/weight for shipping estimate
-5. Click `Preview Shipping Estimate`.
-6. Keep status as `Draft / hidden` until ready.
-7. Change status to `Active auction / public` and save.
-
-### Image URLs
-
-For now, paste a public HTTPS image URL. Good options for launch are Cloudinary, S3, or another image host. Do not use private Google Drive links unless you have confirmed the direct image URL loads publicly in an incognito browser.
-
-### Prints
-
-Prints should still be created inside Printful and imported using `Sync Printful Products`.
-
-### New policy pages
-
-Draft pages were added:
-
-- `/terms.html`
-- `/privacy.html`
-- `/auction-policy.html`
-- `/shipping-policy.html`
-
-These are placeholders for launch preparation, not attorney-reviewed legal documents.
-
-### Security improvements in this iteration
-
-- Admin, bidder registration, and bid routes now have basic rate limiting.
-- Draft originals are hidden from the public originals page.
-- Admin can create, edit, cancel, reopen, end, and archive draft originals.
-
-### Still required before a real public launch
-
-- Move from local SQLite to hosted Postgres.
-- Use a real admin login instead of one shared `ADMIN_SECRET`.
-- Use a verified Resend domain for shipment tracking emails, not only `onboarding@resend.dev`.
-- Use production Stripe keys and production webhook endpoint.
-- Host images on Cloudinary/S3 or a similar service.
-- Review legal pages before launch.
-- Add backups and monitoring.
+Before deploying, run tests and npm audit, back up the production database, deploy, confirm the required environment variables, and verify one end-to-end test order and tracking email. Do not run production load tests without limits.

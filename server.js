@@ -18,7 +18,9 @@ const { estimateOriginalShipping, estimateSelfFulfillmentShipping } = require(".
 const app = express();
 const PORT = process.env.PORT || 3000;
 const BASE_URL = process.env.BASE_URL || `http://localhost:${PORT}`;
-const stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SECRET_KEY) : null;
+const stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SECRET_KEY, { timeout: 20000, maxNetworkRetries: 1 }) : null;
+const { createOrderProcessor } = require("./src/order-processing");
+const orders = createOrderProcessor({ db, stripe, printful, sheets, email });
 const AUTO_CHARGE_AUCTIONS = false;
 const STRIPE_CARD_PERCENT = 0.029;
 const STRIPE_CARD_FIXED_CENTS = 30;
@@ -346,38 +348,31 @@ async function processEndedAuctions({ forceOriginalId = null, force = false } = 
 // Stripe webhooks must receive the raw body.
 app.post("/api/stripe/webhook", express.raw({ type: "application/json" }), async (req, res) => {
   if (!requireStripe(res)) return;
+  if (!process.env.STRIPE_WEBHOOK_SECRET) return res.status(503).json({ error: "Stripe webhook signing is not configured." });
 
   let event;
 
   try {
     const signature = req.headers["stripe-signature"];
-    if (process.env.STRIPE_WEBHOOK_SECRET) {
-      event = stripe.webhooks.constructEvent(req.body, signature, process.env.STRIPE_WEBHOOK_SECRET);
-    } else {
-      event = JSON.parse(req.body.toString());
-    }
+    event = stripe.webhooks.constructEvent(req.body, signature, process.env.STRIPE_WEBHOOK_SECRET);
   } catch (error) {
     return res.status(400).send(`Webhook error: ${error.message}`);
   }
 
   try {
     console.log(`[stripe webhook] received ${event.type}${event.data?.object?.id ? ` (${event.data.object.id})` : ""}`);
-    if (event.type === "checkout.session.expired") {
+    if (event.type === "checkout.session.expired" || event.type === "checkout.session.async_payment_failed") {
       const expiredSession = event.data.object;
       let expiredPayment = db.getPaymentByStripeSessionId(expiredSession.id);
       if (!expiredPayment && expiredSession.metadata?.localPaymentId) {
         expiredPayment = db.getPaymentById(expiredSession.metadata.localPaymentId);
         if (expiredPayment) db.setPaymentCheckoutSession(expiredPayment.id, expiredSession.id, expiredPayment.checkout_url);
       }
-      if (expiredPayment) {
-        if (expiredPayment.kind === "print" && expiredPayment.print_id) db.releasePrintStockReservation(expiredPayment.print_id);
-        if (expiredPayment.kind === "original" && expiredPayment.original_id) db.releaseOriginalCheckout(expiredPayment.original_id);
-        db.markPaymentCancelled(expiredSession.id);
-      }
+      if (expiredPayment) db.cancelCheckoutReservation(expiredSession.id);
       return res.json({ received: true, handled: Boolean(expiredPayment) });
     }
 
-    if (event.type === "checkout.session.completed") {
+    if (event.type === "checkout.session.completed" || event.type === "checkout.session.async_payment_succeeded") {
       const session = event.data.object;
 
       if (session.mode === "setup") {
@@ -417,6 +412,7 @@ app.post("/api/stripe/webhook", express.raw({ type: "application/json" }), async
       }
 
       if (session.mode === "payment") {
+        if (session.payment_status !== "paid") return res.json({ received: true, awaitingPayment: true });
         let payment = db.getPaymentByStripeSessionId(session.id);
         if (!payment && session.metadata?.localPaymentId) {
           payment = db.getPaymentById(session.metadata.localPaymentId);
@@ -426,54 +422,9 @@ app.post("/api/stripe/webhook", express.raw({ type: "application/json" }), async
           console.error(`[stripe webhook] no local payment record for completed session ${session.id}`);
           return res.status(500).json({ error: "Payment record not found." });
         }
-        const paidPrint = payment?.kind === "print" ? db.getPrintById(payment.print_id) : null;
-        const shouldProcessPrintful = payment?.kind === "print" && paidPrint?.fulfillmentType !== "self" && !payment.printful_order_id;
-        if (payment && (payment.status !== "paid" || shouldProcessPrintful)) {
-          const wasAlreadyPaid = payment.status === "paid";
-          if (!wasAlreadyPaid) db.markPaymentPaid(session.id);
-          if (payment.kind === "original") {
-            db.markOriginalSold(payment.original_id);
-          }
-
-          if (payment.kind === "print") {
-            const print = db.getPrintById(payment.print_id);
-            console.log(`[print order] paid session=${session.id} print=${print?.title || payment.print_id}`);
-            if (!wasAlreadyPaid) {
-              if (print?.fulfillmentType === "self") {
-                const stockFinalized = db.finalizePrintStockReservation(print.id);
-                if (!stockFinalized) {
-                  const refund = session.payment_intent ? await stripe.refunds.create({ payment_intent: session.payment_intent, reason: "requested_by_customer" }) : null;
-                  db.markPaymentFailed(session.id, "Self-fulfilled stock was unavailable after payment.");
-                  console.error(`[self fulfillment] stock was unavailable after payment ${payment.id}; refund=${refund?.id || "not-created"}`);
-                  return res.status(500).json({ error: "Stock reservation could not be finalized." });
-                }
-              } else {
-                console.log(`[printful fulfillment] paid order ${payment.id} is ready for fulfillment`);
-              }
-            }
-
-            if (print?.fulfillmentType !== "self") {
-              try {
-                const printfulResult = await printful.createDraftOrderFromStripeSession({ payment, print, stripeSession: session });
-                if (printfulResult?.printfulOrderId) db.setPaymentPrintfulOrderId(payment.id, String(printfulResult.printfulOrderId));
-                console.log(`[print order] Printful result: ${printfulResult?.printfulOrderId ? `draft ${printfulResult.printfulOrderId}` : printfulResult?.reason || "no draft id returned"}`);
-              } catch (error) {
-                console.error(`[print order] Printful draft failed for payment ${payment.id}:`, error.message || error);
-                console.warn(`[print order] Recording payment ${payment.id} in Google Sheets despite the Printful failure.`);
-              }
-            }
-          }
-
-          if (sheets.isConfigured()) {
-            const latestPayment = db.getPaymentByStripeSessionId(session.id);
-            const latestPrint = latestPayment?.kind === "print" ? db.getPrintById(latestPayment.print_id) : null;
-            const latestOriginal = latestPayment?.kind === "original" ? db.getOriginalById(latestPayment.original_id) : null;
-            if (await sheets.appendPaidOrder({ payment: latestPayment, print: latestPrint, original: latestOriginal })) {
-              db.markPaymentGoogleSheetsSynced(latestPayment.id);
-              console.log(`[google sheets] recorded order ${latestPayment.id}`);
-            }
-          }
-        }
+        payment = db.confirmCheckoutPayment(session);
+        const result = await orders.processPayment(payment.id);
+        if (result.errors.length) return res.status(503).json({ error: "Order recorded; integration retry scheduled." });
       }
     }
 
@@ -502,7 +453,6 @@ app.post("/api/printful/webhook", express.json(), async (req, res) => {
     return res.json({ received: true, handled: false });
   }
 
-  const print = payment.print_id ? db.getPrintById(payment.print_id) : null;
   const trackingNumber = String(shipment.tracking_number || "");
   const trackingUrl = String(shipment.tracking_url || "");
   db.setPaymentTracking(payment.id, {
@@ -512,19 +462,8 @@ app.post("/api/printful/webhook", express.json(), async (req, res) => {
     service: String(shipment.service || shipment.shipping_service_name || "")
   });
 
-  if (!payment.tracking_email_sent_at) {
-    const result = await email.sendShipmentTrackingEmail({
-      to: payment.customer_email,
-      customerName: payment.customer_name,
-      productName: print?.title || "your Rayan Rao Art order",
-      carrier: shipment.carrier,
-      service: shipment.service || shipment.shipping_service_name,
-      trackingNumber,
-      trackingUrl
-    });
-    if (!result.sent) return res.status(500).json({ error: result.reason || "Tracking email could not be sent." });
-    db.markPaymentTrackingEmailSent(payment.id);
-  }
+  const result = await orders.processPayment(payment.id);
+  if (result.errors.length) return res.status(503).json({ error: "Shipment recorded; integration retry scheduled." });
 
   console.log(`[printful webhook] tracking recorded for order ${printfulOrderId}`);
   return res.json({ received: true, handled: true });
@@ -534,14 +473,19 @@ app.use(express.json());
 app.use("/api/admin", (req, res) => res.status(404).json({ error: "Admin tools are disabled." }));
 app.use("/api/bidders", (req, res) => res.status(404).json({ error: "Bidding is no longer available." }));
 app.use("/api/originals/:id/bids", (req, res) => res.status(404).json({ error: "Bidding is no longer available." }));
-app.use(express.static(path.join(__dirname, "public")));
+app.use(express.static(path.join(__dirname, "public"), {
+  setHeaders(res, filename) {
+    if (/\.(?:webp|jpg|png)$/i.test(filename)) res.setHeader("Cache-Control", "public, max-age=86400");
+    if (/-[a-f0-9]{12}(?:-\d+)?\.webp$/i.test(filename)) res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+  }
+}));
 
 app.get("/api/health", (req, res) => res.json({
   ok: true,
   message: "Rayan Rao Art API is running.",
   emailEnabled: email.isEmailEnabled(),
   resendConfigured: Boolean(process.env.RESEND_API_KEY),
-  fromEmail: process.env.FROM_EMAIL || "Rayan Rao Art <onboarding@resend.dev>"
+  trackingEmailReady: email.isEmailEnabled()
 }));
 
 app.get("/api/site-content", (req, res) => res.json({ content: db.getSiteContent() }));
@@ -582,13 +526,16 @@ app.post("/api/originals/:id/checkout", checkoutRateLimit, async (req, res) => {
   const estimate = estimateOriginalShipping({ ...art, destinationState: recipient.state_code });
   const customerPrice = prettyStripeAdjustedPrice(art.price);
   const totalAmount = customerPrice + estimate.total;
+  if (req.body.expectedTotal != null && Math.round(Number(req.body.expectedTotal) * 100) !== Math.round(totalAmount * 100)) return res.status(409).json({ error: "The total changed. Please calculate shipping again." });
   if (!db.reserveOriginalCheckout(art.id)) return res.status(409).json({ error: "This original is currently unavailable or already being purchased." });
 
   let payment = null;
   try {
     payment = db.createPayment({ kind: "original", originalId: art.id, stripeSessionId: `pending-${crypto.randomUUID()}`, checkoutUrl: "pending", customerName: recipient.name, customerEmail: recipient.email, subtotalAmount: customerPrice, shippingAmount: estimate.total, totalAmount, amount: totalAmount, shippingJson: { recipient, estimate }, status: "pending" });
+    db.setOriginalReservationOwner(art.id, payment.id);
     const session = await stripe.checkout.sessions.create({
       mode: "payment",
+      payment_method_types: ["card"],
       customer_email: recipient.email,
       payment_intent_data: { receipt_email: recipient.email },
       line_items: [
@@ -600,11 +547,11 @@ app.post("/api/originals/:id/checkout", checkoutRateLimit, async (req, res) => {
       success_url: `${BASE_URL}/success.html?session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${BASE_URL}/originals.html`
     });
-    db.setPaymentCheckoutSession(payment.id, session.id, session.url);
+    db.setPaymentCheckoutSession(payment.id, session.id, session.url, session.expires_at);
     res.json({ checkoutUrl: session.url });
   } catch (error) {
     if (payment) db.markPaymentFailed(payment.stripe_session_id, error.message || "Could not create checkout.");
-    db.releaseOriginalCheckout(art.id);
+    db.releaseOriginalCheckout(art.id, payment?.id ?? null);
     throw error;
   }
 });
@@ -845,6 +792,7 @@ app.post("/api/prints/:id/checkout", checkoutRateLimit, async (req, res) => {
   const { recipient, rate, shippingAmount, fulfillmentTax } = quote;
   const customerPrice = prettyStripeAdjustedPrice(print.price);
   const customerEmail = recipient.email;
+  if (req.body.expectedTotal != null && Math.round(Number(req.body.expectedTotal) * 100) !== Math.round((customerPrice + shippingAmount + fulfillmentTax) * 100)) return res.status(409).json({ error: "The total changed. Please calculate shipping again." });
   const shippingCents = Math.round(shippingAmount * 100);
   const shouldReserveStock = print.fulfillmentType === "self" && print.stockQuantity !== null;
   if (shouldReserveStock && !db.reservePrintStock(print.id)) {
@@ -853,6 +801,7 @@ app.post("/api/prints/:id/checkout", checkoutRateLimit, async (req, res) => {
   let payment = null;
   const sessionConfig = {
     mode: "payment",
+    payment_method_types: ["card"],
     line_items: [{ price_data: { currency: "usd", unit_amount: Math.round(customerPrice * 100), product_data: { name: print.title, description: `${print.productType} · ${print.sizes}` } }, quantity: 1 }],
     customer_email: customerEmail,
     payment_intent_data: { receipt_email: customerEmail },
@@ -867,7 +816,7 @@ app.post("/api/prints/:id/checkout", checkoutRateLimit, async (req, res) => {
     payment = db.createPayment({ kind: "print", printId: print.id, stripeSessionId: `pending-${crypto.randomUUID()}`, checkoutUrl: "pending", customerName: recipient.name, customerEmail, subtotalAmount: customerPrice, shippingAmount, totalAmount: customerPrice + shippingAmount + fulfillmentTax, amount: customerPrice + shippingAmount + fulfillmentTax, shippingJson: { recipient, method: rate.id, name: rate.name, rate: shippingAmount, fulfillmentTax, fulfillmentCosts: quote.fulfillmentCosts || null, currency: rate.currency, estimate: quote.selfEstimate || null }, status: "pending" });
     sessionConfig.metadata.localPaymentId = String(payment.id);
     const session = await stripe.checkout.sessions.create(sessionConfig);
-    db.setPaymentCheckoutSession(payment.id, session.id, session.url);
+    db.setPaymentCheckoutSession(payment.id, session.id, session.url, session.expires_at);
     res.json({ checkoutUrl: session.url });
   } catch (error) {
     if (payment) db.markPaymentFailed(payment.stripe_session_id, error.message || "Could not create checkout.");
@@ -1089,16 +1038,27 @@ app.get(["/", "/index.html", "/originals.html", "/prints.html", "/success.html",
   res.sendFile(path.join(__dirname, "public", file));
 });
 
-async function syncPrintfulOnStartup() {
-  if (String(process.env.PRINTFUL_SYNC_ON_STARTUP || "false").toLowerCase() !== "true") return;
+app.use((error, req, res, next) => {
+  if (res.headersSent) return next(error);
+  console.error(`[request failed] ${req.method} ${req.path}: ${error.message}`);
+  const status = error.type === "entity.parse.failed" ? 400 : 500;
+  res.status(status).json({ error: status === 400 ? "Invalid request data." : "Could not complete this request. Please try again." });
+});
+
+let printfulSyncRunning = false;
+async function syncPrintfulOnStartup(force = false) {
+  if (!process.env.PRINTFUL_API_KEY || printfulSyncRunning) return;
+  if (!force && String(process.env.PRINTFUL_SYNC_ON_STARTUP || "false").toLowerCase() !== "true") return;
+  printfulSyncRunning = true;
   try {
     const syncData = await printful.fetchPrintfulProductsForWebsite();
     const results = db.upsertPrintfulPrints(syncData.importedProducts);
+    if (syncData.complete) db.archiveMissingPrintfulPrints(syncData.importedProducts.map((item) => item.printfulSyncVariantId));
     console.log(`[printful startup sync] imported ${syncData.importedProducts.length} variants from ${syncData.printfulProductCount} products; created ${results.filter((item) => item.action === "created").length}, updated ${results.filter((item) => item.action === "updated").length}`);
     if (syncData.skipped.length) console.warn(`[printful startup sync] skipped ${syncData.skipped.length} products or variants.`);
   } catch (error) {
     console.error("[printful startup sync] failed:", error.message || error);
-  }
+  } finally { printfulSyncRunning = false; }
 }
 
 async function configurePrintfulWebhookOnStartup() {
@@ -1127,10 +1087,25 @@ async function configurePrintfulWebhookOnStartup() {
   }
 }
 
-app.listen(PORT, async () => {
+function startServer() {
+  const server = app.listen(PORT, async () => {
   console.log(`Rayan Rao Art site running at http://localhost:${PORT}`);
   const releasedReservations = db.releaseStaleCheckoutReservations();
   if (releasedReservations) console.log(`[checkout cleanup] released ${releasedReservations} stale reservation(s)`);
   await syncPrintfulOnStartup();
   await configurePrintfulWebhookOnStartup();
-});
+  if (!email.isEmailEnabled()) console.warn("[tracking] Verify a Resend domain and set RESEND_API_KEY and FROM_EMAIL before customer shipment emails can send.");
+  await orders.tick().catch((error) => console.error("[orders] retry worker:", error.message));
+  });
+  const retryTimer = setInterval(() => orders.tick().catch((error) => console.error("[orders] retry worker:", error.message)), 60000);
+  retryTimer.unref();
+  const syncInterval = Number(process.env.PRINTFUL_SYNC_INTERVAL_MS ?? 900000);
+  const syncTimer = Number.isFinite(syncInterval) && syncInterval >= 60000
+    ? setInterval(() => syncPrintfulOnStartup(true), syncInterval) : null;
+  syncTimer?.unref();
+  server.on("close", () => { clearInterval(retryTimer); if (syncTimer) clearInterval(syncTimer); });
+  return server;
+}
+
+if (require.main === module) startServer();
+module.exports = { app, startServer, orders };

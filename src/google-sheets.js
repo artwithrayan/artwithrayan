@@ -43,7 +43,8 @@ async function getAccessToken() {
   const response = await fetch(TOKEN_URL, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({ grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer", assertion })
+    body: new URLSearchParams({ grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer", assertion }),
+    signal: AbortSignal.timeout(20000)
   });
   const data = await response.json();
   if (!response.ok || !data.access_token) throw new Error(`Google authorization failed: ${data.error_description || data.error || response.statusText}`);
@@ -55,7 +56,8 @@ async function sheetsRequest(path, options = {}) {
   const token = await getAccessToken();
   const response = await fetch(`${API_BASE}/${getConfig().spreadsheetId}${path}`, {
     ...options,
-    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", ...(options.headers || {}) }
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", ...(options.headers || {}) },
+    signal: AbortSignal.timeout(20000)
   });
   const data = await response.json();
   if (!response.ok) throw new Error(`Google Sheets API error ${response.status}: ${data.error?.message || response.statusText}`);
@@ -69,7 +71,7 @@ async function ensureHeaders() {
   const existing = await sheetsRequest(`/values/${encodeURIComponent(headerRange)}`);
   const existingHeaders = existing.values?.[0] || [];
   if (existingHeaders[0] && existingHeaders.length === DEFAULT_HEADERS.length) return;
-  await sheetsRequest(`/values/${encodeURIComponent(firstCell)}?valueInputOption=USER_ENTERED`, {
+  await sheetsRequest(`/values/${encodeURIComponent(firstCell)}?valueInputOption=RAW`, {
     method: "PUT",
     body: JSON.stringify({ range: firstCell, majorDimension: "ROWS", values: [DEFAULT_HEADERS] })
   });
@@ -85,7 +87,7 @@ async function upsertExistingOrderRow(config, orderId, row) {
   const existing = await sheetsRequest(`/values/${encodeURIComponent(config.range)}`);
   const rowIndex = (existing.values || []).findIndex((values) => String(values?.[0] || "") === String(orderId));
   if (rowIndex < 0) return false;
-  await sheetsRequest(`/values/${encodeURIComponent(rowRange(config, rowIndex + 1))}?valueInputOption=USER_ENTERED`, {
+  await sheetsRequest(`/values/${encodeURIComponent(rowRange(config, rowIndex + 1))}?valueInputOption=RAW`, {
     method: "PUT",
     body: JSON.stringify({ majorDimension: "ROWS", values: [row] })
   });
@@ -93,7 +95,7 @@ async function upsertExistingOrderRow(config, orderId, row) {
 }
 
 function money(value) {
-  return Number.isFinite(Number(value)) ? Number(value).toFixed(2) : "";
+  return Number.isFinite(Number(value)) ? Math.round(Number(value) * 100) / 100 : "";
 }
 
 function shippingFields(payment) {
@@ -128,7 +130,9 @@ async function appendPaidOrder({ payment, print, original }) {
   const stripeFeeEstimate = total > 0 ? total * 0.029 + 0.30 : 0;
   const costs = fulfillmentCosts(payment);
   const printfulTotal = costs ? Number(costs.total || 0) : 0;
-  const estimatedProfit = total - stripeFeeEstimate - printfulTotal;
+  let selfShippingEstimate = 0;
+  try { selfShippingEstimate = Number(JSON.parse(payment.shipping_json || "{}").estimate?.total || 0); } catch { /* Older orders may not have an estimate. */ }
+  const estimatedProfit = total - stripeFeeEstimate - printfulTotal - (costs ? 0 : selfShippingEstimate);
   const [address, city, state, zip, country] = shippingFields(payment);
   let fulfillmentTaxCharged = 0;
   try { fulfillmentTaxCharged = Number(JSON.parse(payment.shipping_json || "{}").fulfillmentTax || 0); } catch { fulfillmentTaxCharged = 0; }
@@ -155,15 +159,13 @@ async function appendPaidOrder({ payment, print, original }) {
     costs ? money(costs.shipping) : "",
     costs ? money(Number(costs.tax || 0) + Number(costs.vat || 0)) : "",
     costs ? money(printfulTotal) : "",
-    costs || payment.kind === "original" || print?.fulfillmentType === "self" ? money(estimatedProfit) : "",
+    payment.status === "paid" && (costs || payment.kind === "original" || print?.fulfillmentType === "self") ? money(estimatedProfit) : "",
     payment.printful_order_id || "",
     address, city, state, zip, country
   ];
-  if (payment.google_sheets_synced_at) {
-    if (!payment.printful_order_id) return false;
-    return upsertExistingOrderRow(config, payment.id, row);
-  }
-  await sheetsRequest(`/values/${encodeURIComponent(config.range)}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`, {
+  // Check every attempt: an append may succeed even if its response was lost.
+  if (await upsertExistingOrderRow(config, payment.id, row)) return true;
+  await sheetsRequest(`/values/${encodeURIComponent(config.range)}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`, {
     method: "POST",
     body: JSON.stringify({ majorDimension: "ROWS", values: [row] })
   });

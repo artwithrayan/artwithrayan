@@ -6,6 +6,17 @@ function money(value) {
 }
 function escapeHtml(value) { return String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#039;"); }
 
+function imageAttributes(url) {
+  const asset = window.ART_IMAGE_ASSETS?.[url];
+  if (!asset) return `src="${escapeHtml(url)}"`;
+  const sources = asset.sources;
+  return `src="${escapeHtml(sources.at(-1).url)}" srcset="${sources.map((source) => `${escapeHtml(source.url)} ${source.width}w`).join(", ")}" sizes="(max-width: 600px) 100vw, (max-width: 1000px) 50vw, 45vw" width="${asset.width}" height="${asset.height}"`;
+}
+
+function responsiveImage(url, title, attributes = "") {
+  return `<img ${imageAttributes(url)} alt="${escapeHtml(title)}" ${attributes}>`;
+}
+
 const US_STATE_OPTIONS = `<option value="">State</option><option value="AL">Alabama</option><option value="AK">Alaska</option><option value="AZ">Arizona</option><option value="AR">Arkansas</option><option value="CA">California</option><option value="CO">Colorado</option><option value="CT">Connecticut</option><option value="DE">Delaware</option><option value="FL">Florida</option><option value="GA">Georgia</option><option value="HI">Hawaii</option><option value="ID">Idaho</option><option value="IL">Illinois</option><option value="IN">Indiana</option><option value="IA">Iowa</option><option value="KS">Kansas</option><option value="KY">Kentucky</option><option value="LA">Louisiana</option><option value="ME">Maine</option><option value="MD">Maryland</option><option value="MA">Massachusetts</option><option value="MI">Michigan</option><option value="MN">Minnesota</option><option value="MS">Mississippi</option><option value="MO">Missouri</option><option value="MT">Montana</option><option value="NE">Nebraska</option><option value="NV">Nevada</option><option value="NH">New Hampshire</option><option value="NJ">New Jersey</option><option value="NM">New Mexico</option><option value="NY">New York</option><option value="NC">North Carolina</option><option value="ND">North Dakota</option><option value="OH">Ohio</option><option value="OK">Oklahoma</option><option value="OR">Oregon</option><option value="PA">Pennsylvania</option><option value="RI">Rhode Island</option><option value="SC">South Carolina</option><option value="SD">South Dakota</option><option value="TN">Tennessee</option><option value="TX">Texas</option><option value="UT">Utah</option><option value="VT">Vermont</option><option value="VA">Virginia</option><option value="WA">Washington</option><option value="WV">West Virginia</option><option value="WI">Wisconsin</option><option value="WY">Wyoming</option>`;
 
 function timeRemaining(endsAt) {
@@ -18,7 +29,7 @@ function timeRemaining(endsAt) {
 }
 
 function artworkImage(item, className = "", imageAttributes = "") {
-  if (item.imageUrl) return `<div class="art-image ${className}" style="--c1:${item.colorOne}; --c2:${item.colorTwo}"><img src="${escapeHtml(item.imageUrl)}" alt="${escapeHtml(item.title)}" ${imageAttributes}></div>`;
+  if (item.imageUrl) return `<div class="art-image ${className}" style="--c1:${item.colorOne}; --c2:${item.colorTwo}">${responsiveImage(item.imageUrl, item.title, `loading="lazy" decoding="async" ${imageAttributes}`)}</div>`;
   return `<div class="art-image ${className}" style="--c1:${item.colorOne}; --c2:${item.colorTwo}"></div>`;
 }
 
@@ -109,7 +120,14 @@ function attachRevealHandlers() {
       const image = card?.querySelector(".original-art-image img");
       if (!image) return;
       const revealed = image.dataset.revealed === "true";
-      image.src = revealed ? image.dataset.standardImage : image.dataset.revealImage;
+      const url = revealed ? image.dataset.standardImage : image.dataset.revealImage;
+      const template = document.createElement("template");
+      template.innerHTML = responsiveImage(url, image.alt);
+      ["src", "srcset", "sizes", "width", "height"].forEach((attribute) => {
+        const value = template.content.firstElementChild.getAttribute(attribute);
+        if (value === null) image.removeAttribute(attribute);
+        else image.setAttribute(attribute, value);
+      });
       image.dataset.revealed = String(!revealed);
       button.setAttribute("aria-pressed", String(!revealed));
       button.textContent = revealed ? "Shine a light" : "Return to normal light";
@@ -125,7 +143,7 @@ function attachOriginalPurchaseHandlers(originals) {
       if (!art) return;
       const dialog = ensurePrintDialog();
       const content = dialog.querySelector("#printDialogContent");
-      content.innerHTML = `<div class="dialog-heading"><p class="section-label">Original artwork</p><h2>${escapeHtml(art.title)}</h2><p>${escapeHtml(art.description)}</p><p class="dialog-price">${money(art.price)} before shipping</p></div><form class="checkout-form original-checkout-form" data-id="${art.id}"><input name="name" type="text" placeholder="Full name" required /><input name="email" type="email" placeholder="Email for receipt" required /><input name="address1" type="text" placeholder="Address" required /><input name="address2" type="text" placeholder="Apartment, suite, etc. (optional)" /><div class="form-grid compact-grid"><input name="city" type="text" placeholder="City" required /><select name="state" required>${US_STATE_OPTIONS}</select><input name="postalCode" type="text" placeholder="ZIP code" required /></div><input name="country" type="text" value="US" placeholder="Country" required /><button type="button" class="quote-shipping">Calculate shipping</button><button type="submit" disabled>Continue to Stripe</button></form><p class="notice">Enter your mailing address to see the shipping estimate.</p>`;
+      content.innerHTML = `<div class="dialog-heading"><p class="section-label">Original artwork</p><h2>${escapeHtml(art.title)}</h2><p class="product-meta">${escapeHtml(art.medium)} · ${escapeHtml(art.size)}</p><p>${escapeHtml(art.description)}</p><p class="dialog-price">${money(art.price)} before shipping</p></div><form class="checkout-form original-checkout-form" data-id="${art.id}"><input name="name" type="text" placeholder="Full name" required /><input name="email" type="email" placeholder="Email for receipt" required /><input name="address1" type="text" placeholder="Address" required /><input name="address2" type="text" placeholder="Apartment, suite, etc. (optional)" /><div class="form-grid compact-grid"><input name="city" type="text" placeholder="City" required /><select name="state" required>${US_STATE_OPTIONS}</select><input name="postalCode" type="text" placeholder="ZIP code" required /></div><input name="country" type="text" value="US" placeholder="Country" required /><button type="button" class="quote-shipping">Calculate shipping</button><button type="submit" disabled>Continue to Stripe</button></form><p class="notice">Enter your mailing address to see the shipping estimate.</p>`;
       attachOriginalCheckoutHandlers(content, art);
       dialog.showModal();
     });
@@ -134,36 +152,7 @@ function attachOriginalPurchaseHandlers(originals) {
 
 function attachOriginalCheckoutHandlers(content, art) {
   const form = content.querySelector(".original-checkout-form");
-  const quoteButton = form.querySelector(".quote-shipping");
-  const checkoutButton = form.querySelector("button[type=submit]");
-  const notice = content.querySelector(".notice");
-  quoteButton.addEventListener("click", async () => {
-    quoteButton.disabled = true;
-    notice.className = "notice";
-    notice.textContent = "Calculating shipping...";
-    try {
-      const data = await fetchJson(`${API}/api/originals/${art.id}/shipping-rate`, { method: "POST", body: JSON.stringify(Object.fromEntries(new FormData(form).entries())) });
-      checkoutButton.disabled = false;
-      notice.textContent = `Shipping: ${money(data.shipping)}. Estimated total: ${money(data.total)}.`;
-    } catch (error) {
-      notice.className = "notice error";
-      notice.textContent = error.message;
-    } finally { quoteButton.disabled = false; }
-  });
-  form.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    checkoutButton.disabled = true;
-    notice.className = "notice";
-    notice.textContent = "Creating secure checkout...";
-    try {
-      const data = await fetchJson(`${API}/api/originals/${art.id}/checkout`, { method: "POST", body: JSON.stringify(Object.fromEntries(new FormData(form).entries())) });
-      window.location.href = data.checkoutUrl;
-    } catch (error) {
-      notice.className = "notice error";
-      notice.textContent = error.message;
-      checkoutButton.disabled = false;
-    }
-  });
+  attachCheckoutHandler(form, "originals", content.querySelector(".notice"));
 }
 
 function renderPrintGallery(artworks, grid) {
@@ -228,6 +217,7 @@ function attachArtworkPurchaseHandlers(artworks) {
       const selectProduct = (product) => {
         if (!product) return;
         form.dataset.id = product.id;
+        form.dispatchEvent(new Event("quoteinvalidated"));
         content.querySelector(".selected-product-price").textContent = `${money(product.price)} before shipping`;
         content.querySelector("[data-product-options]").innerHTML = optionSummary(product);
         content.querySelectorAll(".variant-button").forEach((item) => item.classList.toggle("active", item.dataset.productId === product.id));
@@ -297,46 +287,71 @@ function attachPrintPurchaseHandlers(prints) {
   });
 }
 
-function attachPrintCheckoutHandlers() {
-  document.querySelectorAll(".checkout-form").forEach((form) => {
-    const quoteButton = form.querySelector(".quote-shipping");
-    const checkoutButton = form.querySelector("button[type=submit]");
-    quoteButton.addEventListener("click", async () => {
-      const id = form.dataset.id;
-      const notice = form.parentElement.querySelector(".notice");
-      const formData = new FormData(form);
-      quoteButton.disabled = true;
-      notice.className = "notice";
-      notice.textContent = "Calculating Printful shipping...";
-      try {
-        const data = await fetchJson(`${API}/api/prints/${id}/shipping-rate`, { method: "POST", body: JSON.stringify(Object.fromEntries(formData.entries())) });
-        form.dataset.shipping = String(data.shipping);
-        checkoutButton.disabled = false;
-        const delivery = data.delivery?.min && data.delivery?.max ? ` Estimated delivery: ${data.delivery.min}-${data.delivery.max} business days.` : "";
-        notice.textContent = `Shipping: ${money(data.shipping)}. Estimated Printful fulfillment tax: ${money(data.fulfillmentTax)}. Estimated total: ${money(data.total)}.${delivery}`;
-      } catch (error) {
-        notice.className = "notice error";
-        notice.textContent = error.message;
-      } finally { quoteButton.disabled = false; }
-    });
-    form.addEventListener("submit", async (event) => {
-      event.preventDefault();
-      const id = form.dataset.id;
-      const notice = form.parentElement.querySelector(".notice");
-      const button = checkoutButton;
-      const formData = new FormData(form);
-      notice.className = "notice";
-      notice.textContent = "Creating secure checkout...";
-      button.disabled = true;
-      try {
-        const data = await fetchJson(`${API}/api/prints/${id}/checkout`, { method: "POST", body: JSON.stringify(Object.fromEntries(formData.entries())) });
-        window.location.href = data.checkoutUrl;
-      } catch (error) {
-        notice.className = "notice error";
-        notice.textContent = error.message;
-        button.disabled = false;
-      }
-    });
+function attachPrintCheckoutHandlers(root = document) {
+  root.querySelectorAll(".checkout-form:not(.original-checkout-form)").forEach((form) => {
+    attachCheckoutHandler(form, "prints", form.parentElement.querySelector(".notice"));
+  });
+}
+
+function attachCheckoutHandler(form, kind, notice) {
+  if (form.dataset.checkoutBound) return;
+  form.dataset.checkoutBound = "true";
+  const quoteButton = form.querySelector(".quote-shipping");
+  const checkoutButton = form.querySelector("button[type=submit]");
+  let revision = 0;
+  let quotedRevision = -1;
+  let quotedTotal = null;
+  let submitting = false;
+  const invalidate = () => {
+    revision++;
+    quotedRevision = -1;
+    quotedTotal = null;
+    checkoutButton.disabled = true;
+    notice.className = "notice";
+    notice.textContent = "Calculate shipping for your current selection and address.";
+  };
+  ["input", "change", "quoteinvalidated"].forEach((event) => form.addEventListener(event, invalidate));
+  quoteButton.addEventListener("click", async () => {
+    if (!form.reportValidity() || submitting) return;
+    const current = revision;
+    const id = form.dataset.id;
+    quotedRevision = -1;
+    checkoutButton.disabled = true;
+    quoteButton.disabled = true;
+    notice.className = "notice";
+    notice.textContent = "Calculating shipping...";
+    try {
+      const data = await fetchJson(`${API}/api/${kind}/${id}/shipping-rate`, { method: "POST", body: JSON.stringify(Object.fromEntries(new FormData(form).entries())) });
+      if (current !== revision) return;
+      quotedRevision = revision;
+      quotedTotal = data.total;
+      checkoutButton.disabled = false;
+      const tax = Number(data.fulfillmentTax) > 0 ? ` Fulfillment tax: ${money(data.fulfillmentTax)}.` : "";
+      const delivery = data.delivery?.min && data.delivery?.max ? ` Estimated delivery: ${data.delivery.min}-${data.delivery.max} business days.` : "";
+      notice.textContent = `Shipping: ${money(data.shipping)}.${tax} Estimated total: ${money(data.total)}.${delivery}`;
+    } catch (error) {
+      if (current !== revision) return;
+      notice.className = "notice error";
+      notice.textContent = error.message;
+    } finally { quoteButton.disabled = false; }
+  });
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (submitting || quotedRevision !== revision || quotedTotal === null || !form.reportValidity()) return;
+    submitting = true;
+    checkoutButton.disabled = true;
+    quoteButton.disabled = true;
+    notice.className = "notice";
+    notice.textContent = "Creating secure checkout...";
+    try {
+      const body = { ...Object.fromEntries(new FormData(form).entries()), expectedTotal: quotedTotal };
+      const data = await fetchJson(`${API}/api/${kind}/${form.dataset.id}/checkout`, { method: "POST", body: JSON.stringify(body) });
+      window.location.href = data.checkoutUrl;
+    } catch (error) {
+      invalidate();
+      notice.className = "notice error";
+      notice.textContent = `${error.message} Please calculate shipping again.`;
+    } finally { submitting = false; quoteButton.disabled = false; }
   });
 }
 
@@ -353,7 +368,7 @@ async function loadSiteContent() {
     const banner = document.querySelector("[data-edit-key='bannerImages.0']");
     if (banner && content.bannerImages?.[0]) { banner.style.backgroundImage = `url("${content.bannerImages[0]}")`; banner.classList.add("has-image"); }
     const aboutImage = document.querySelector("[data-edit-key='aboutImage']");
-    if (aboutImage && content.aboutImage) { aboutImage.innerHTML = `<img src="${content.aboutImage}" alt="Rayan Rao">`; aboutImage.classList.add("has-image"); }
+    if (aboutImage && content.aboutImage) { aboutImage.innerHTML = responsiveImage(content.aboutImage, "Rayan Rao", 'fetchpriority="high" decoding="async"'); aboutImage.classList.add("has-image"); }
   } catch { /* Keep the built-in homepage copy if the API is unavailable. */ }
 }
 

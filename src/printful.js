@@ -34,7 +34,8 @@ async function printfulFetch(path, options = {}) {
         "Content-Type": "application/json",
         ...(options.headers || {})
       },
-      body
+      body,
+      signal: AbortSignal.timeout(20000)
     });
   }
 
@@ -47,7 +48,7 @@ async function printfulFetch(path, options = {}) {
 
   if (!response.ok) {
     const detail = data?.error?.message || data?.message || response.statusText;
-    throw new Error(`Printful API error ${response.status}: ${detail}`);
+    throw Object.assign(new Error(`Printful API error ${response.status}: ${detail}`), { statusCode: response.status });
   }
 
   return data;
@@ -176,6 +177,7 @@ async function fetchPrintfulProductsForWebsite() {
   const productSummaries = await getStoreProducts();
   const importedProducts = [];
   const skipped = [];
+  let complete = true;
 
   for (const summary of productSummaries) {
     const productId = firstDefined(summary.id, summary.sync_product_id);
@@ -210,11 +212,12 @@ async function fetchPrintfulProductsForWebsite() {
         importedProducts.push(normalized);
       }
     } catch (error) {
+      complete = false;
       skipped.push({ reason: error.message, product: summary.name || summary.title || String(productId) });
     }
   }
 
-  return { importedProducts, skipped, printfulProductCount: productSummaries.length };
+  return { importedProducts, skipped, complete, printfulProductCount: productSummaries.length };
 }
 
 async function configureWebhooks({ url, types = ["package_shipped"] }) {
@@ -237,30 +240,50 @@ async function createDraftOrderFromStripeSession({ payment, print, stripeSession
 
   const recipient = {
     name,
-    address1: storedRecipient?.address1 || address.line1,
-    address2: storedRecipient?.address2 || address.line2 || "",
-    city: storedRecipient?.city || address.city,
-    state_code: storedRecipient?.state_code || address.state || "",
-    country_code: storedRecipient?.country_code || address.country,
-    zip: storedRecipient?.zip || address.postal_code
+    address1: storedRecipient?.address1 || address?.line1,
+    address2: storedRecipient?.address2 || address?.line2 || "",
+    city: storedRecipient?.city || address?.city,
+    state_code: storedRecipient?.state_code || address?.state || "",
+    country_code: storedRecipient?.country_code || address?.country,
+    zip: storedRecipient?.zip || address?.postal_code
   };
 
   let shippingJson = {};
   try { shippingJson = payment.shipping_json ? JSON.parse(payment.shipping_json) : {}; } catch { shippingJson = {}; }
   const externalId = `rayan-payment-${payment.id}`;
+  const findExisting = async () => {
+    try {
+      const data = await printfulFetch(`/orders/@${encodeURIComponent(externalId)}`);
+      return { printfulOrderId: data?.result?.id || data?.id || data?.data?.id, data };
+    } catch (error) {
+      if (error.statusCode === 404) return null;
+      throw error;
+    }
+  };
+  const existing = await findExisting();
+  if (existing?.printfulOrderId) return existing;
+  const createOrder = async (payload) => {
+    try {
+      const data = await printfulFetch("/orders?confirm=false", { method: "POST", body: JSON.stringify(payload) });
+      return { printfulOrderId: data?.result?.id || data?.id || data?.data?.id, data };
+    } catch (error) {
+      // Recover after a duplicate ID or a lost POST response without ordering twice.
+      const recovered = await findExisting();
+      if (recovered?.printfulOrderId) return recovered;
+      throw error;
+    }
+  };
 
   if (print.printfulSyncVariantId) {
     const item = { sync_variant_id: Number(print.printfulSyncVariantId), quantity: 1 };
     if (Array.isArray(print.printfulOptions) && print.printfulOptions.length) item.options = print.printfulOptions;
     const payload = { external_id: externalId, shipping: shippingJson.method || undefined, recipient, items: [item] };
-    const data = await printfulFetch("/orders?confirm=false", { method: "POST", body: JSON.stringify(payload) });
-    return { printfulOrderId: data?.result?.id || data?.id || data?.data?.id, data };
+    return createOrder(payload);
   }
 
   if (print.printfulVariantId && print.printFileUrl) {
     const payload = { external_id: externalId, shipping: shippingJson.method || undefined, recipient, items: [{ variant_id: Number(print.printfulVariantId), quantity: 1, files: [{ url: print.printFileUrl }] }] };
-    const data = await printfulFetch("/orders?confirm=false", { method: "POST", body: JSON.stringify(payload) });
-    return { printfulOrderId: data?.result?.id || data?.id || data?.data?.id, data };
+    return createOrder(payload);
   }
 
   console.log("[printful skipped] Product has no Printful sync variant or manual variant/file data.", print.id);
