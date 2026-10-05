@@ -145,8 +145,33 @@ async function main() {
       assert.equal(await dialog.locator('[name="taxNumber"]').isDisabled(), true);
       assert.equal(await dialog.locator('[data-international-notice]').isVisible(), false);
       assert.equal(await dialog.locator('[name="phone"]').getAttribute("required"), null);
+
+      const printCatalog = await (await fetch(base + "/api/prints")).json();
+      const artwork = printCatalog.artworks[0];
+      const lightArtwork = { ...artwork, key: "the-light", title: "The Light", products: [...artwork.products, { ...artwork.products[0], id: "test-canvas", productType: "Canvas", sizes: "8x10" }] };
+      await page.route("**/api/prints", (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ artworks: [lightArtwork, { ...artwork, key: "dogs-playing-poker", title: "Dogs Playing Poker" }] }) }));
+      await page.goto(base + "/prints.html");
+      const lightCard = page.locator(".gallery-card").filter({ hasText: "The Light" });
+      const dogsCard = page.locator(".gallery-card").filter({ hasText: "Dogs Playing Poker" });
+      const printNote = "The print of this painting does not interact with light like the original painting.";
+      assert.equal(await lightCard.locator(".print-product-note").innerText(), printNote);
+      assert.equal(await dogsCard.locator(".print-product-note").count(), 0);
+      await lightCard.locator(".view-products").click();
+      assert.equal(await dialog.locator(".print-product-note").innerText(), printNote);
+      await dialog.locator(".variant-button").last().click();
+      assert.equal(await dialog.locator(".print-product-note").innerText(), printNote);
+      await dialog.locator(".product-choice").selectOption("Canvas");
+      assert.equal(await dialog.locator(".print-product-note").innerText(), printNote);
+      assert.equal(await dialog.locator(".print-product-note").evaluate((element) => getComputedStyle(element).fontSize), "12px");
+      assert.equal(await dialog.evaluate((element) => element.scrollWidth > element.clientWidth + 1), false);
+      await dialog.locator(".print-product-note").scrollIntoViewIfNeeded();
+      await page.screenshot({ path: path.join(output, `light-print-note-${width}.png`), fullPage: true });
+      await dialog.locator(".dialog-close").click();
+      await dogsCard.locator(".view-products").click();
+      assert.equal(await dialog.locator(".print-product-note").count(), 0);
+      await page.unroute("**/api/prints");
       assert.deepEqual(errors, []);
-      results.push({ width, checkoutInvalidation: true, staleResponseIgnored: true, reveal: true, originalEmailInquiries: true, internationalAddresses: true });
+      results.push({ width, checkoutInvalidation: true, staleResponseIgnored: true, reveal: true, originalEmailInquiries: true, internationalAddresses: true, lightPrintNote: true });
       await context.close();
     }
     const manifest = require("node:vm").runInNewContext(await fs.readFile(path.resolve(__dirname, "../public/image-assets.js"), "utf8") + ";window.ART_IMAGE_ASSETS", { window: {} });

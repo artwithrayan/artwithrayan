@@ -198,6 +198,12 @@ function attachRevealHandlers() {
   });
 }
 
+function artworkPrintNote(artwork) {
+  return artwork.key === "the-light"
+    ? '<p class="print-product-note">The print of this painting does not interact with light like the original painting.</p>'
+    : "";
+}
+
 function renderPrintGallery(artworks, grid) {
   if (!artworks.length) { grid.innerHTML = "<p>No artworks are currently available.</p>"; return; }
   grid.innerHTML = artworks.map((artwork) => {
@@ -205,7 +211,7 @@ function renderPrintGallery(artworks, grid) {
     return `
     <article class="product-card gallery-card">
       ${artworkImage(artwork)}
-      <div class="product-info"><div class="product-title-row"><h3>${escapeHtml(artwork.title)}</h3><span class="product-count">${productCount} product${productCount === 1 ? "" : "s"}</span></div></div>
+      <div class="product-info"><div class="product-title-row"><h3>${escapeHtml(artwork.title)}</h3><span class="product-count">${productCount} product${productCount === 1 ? "" : "s"}</span></div>${artworkPrintNote(artwork)}</div>
       <button type="button" class="view-products" data-artwork-key="${escapeHtml(artwork.key)}">View products</button>
     </article>`;
   }).join("");
@@ -236,7 +242,7 @@ function attachArtworkPurchaseHandlers(artworks) {
       const sizeButtons = (products, selectedId) => products.map((product) => { const available = product.stockQuantity === null ? null : Math.max(Number(product.stockQuantity) - Number(product.stockReserved || 0), 0); const stock = available === null ? "" : available > 0 ? ` · ${available} available` : " · Sold out"; return `<button type="button" class="variant-button ${product.id === selectedId ? "active" : ""}" data-product-id="${escapeHtml(product.id)}" ${available === 0 ? "disabled" : ""}>${escapeHtml(product.sizes || product.title)} · ${money(product.price)}${stock}</button>`; }).join("");
       const optionSummary = (product) => (product.printfulOptions || []).map((option) => `<span class="product-option">${escapeHtml(option.id.replaceAll("_", " "))}: ${escapeHtml(option.value)}</span>`).join("");
       const content = dialog.querySelector("#printDialogContent");
-      content.innerHTML = `<div class="dialog-heading"><p class="section-label">${artwork.products.length} options available</p><h2 id="printDialogTitle">${escapeHtml(artwork.title)}</h2><p>${escapeHtml(artwork.description || "Made-to-order products fulfilled through Printful.")}</p><label class="product-choice-label" for="productChoice">Choose a product type</label><select id="productChoice" class="product-choice">${typeOptions}</select><label class="product-choice-label">Choose a size</label><div class="variant-buttons" data-variant-buttons>${sizeButtons(typeProducts(firstType), firstProduct.id)}</div><div class="product-options" data-product-options>${optionSummary(firstProduct)}</div><p class="dialog-price selected-product-price">${money(firstProduct.price)} before shipping</p></div><form class="checkout-form" data-id="${firstProduct.id}" data-fulfillment-type="${escapeHtml(firstProduct.fulfillmentType || "printful")}">${shippingAddressFields()}<button type="button" class="quote-shipping">Calculate shipping</button><button type="submit" disabled>Continue to Stripe</button></form><p class="notice" id="notice-${firstProduct.id}">Enter your mailing address to see live Printful shipping.</p>`;
+      content.innerHTML = `<div class="dialog-heading"><p class="section-label">${artwork.products.length} options available</p><h2 id="printDialogTitle">${escapeHtml(artwork.title)}</h2><p>${escapeHtml(artwork.description || "Made-to-order products fulfilled through Printful.")}</p>${artworkPrintNote(artwork)}<label class="product-choice-label" for="productChoice">Choose a product type</label><select id="productChoice" class="product-choice">${typeOptions}</select><label class="product-choice-label">Choose a size</label><div class="variant-buttons" data-variant-buttons>${sizeButtons(typeProducts(firstType), firstProduct.id)}</div><div class="product-options" data-product-options>${optionSummary(firstProduct)}</div><p class="dialog-price selected-product-price">${money(firstProduct.price)} before shipping</p></div><form class="checkout-form" data-id="${firstProduct.id}" data-fulfillment-type="${escapeHtml(firstProduct.fulfillmentType || "printful")}">${shippingAddressFields()}<button type="button" class="quote-shipping">Calculate shipping</button><button type="submit" disabled>Continue to Stripe</button></form><p class="notice" id="notice-${firstProduct.id}">Enter your mailing address to see live Printful shipping.</p>`;
       const form = content.querySelector(".checkout-form");
       const heading = content.querySelector(".dialog-heading");
       const notice = content.querySelector(".notice");

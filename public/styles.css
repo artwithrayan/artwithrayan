@@ -148,6 +148,7 @@
 .dialog-heading { border-bottom: 1px solid var(--line); padding: 14px 0 18px; margin-bottom: 18px; }
 .dialog-heading h2 { margin: 0 0 8px; font-size: clamp(28px, 5vw, 48px); line-height: .95; font-weight: 500; }
 .dialog-heading p { margin: 8px 0 0; }
+.print-product-note { color: var(--muted); font-size: 12px; line-height: 1.55; overflow-wrap: anywhere; }
 .dialog-price { font-weight: 600; color: var(--ink) !important; }
 .print-dialog .checkout-form { display: grid; margin-top: 0; border-top: 0; padding-top: 0; }
 .product-view-layout { display: grid; grid-template-columns: minmax(220px, .9fr) minmax(280px, 1.1fr); gap: 24px; align-items: start; }
