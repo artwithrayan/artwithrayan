@@ -8,7 +8,7 @@ const sharp = process.env.IMAGE_TOOLS_MODULES
 
 async function main() {
   const publicDir = path.join(__dirname, "..", "public");
-  const names = ["aboutme.png", "the-light.jpg", "the-light-reveal.jpg", "the-wading-man.jpg", "flower.jpg", "wine-night.jpg", "dogs-playing-poker-original.jpg"];
+  const names = ["aboutme.png", "the-light.jpg", "the-light-reveal.jpg", "the-wading-man.jpg", "flower.jpg", "wine-night.jpg", "dogs-playing-poker-original.jpg", "sun-beam.jpeg"];
   const manifest = {};
   let originalBytes = 0;
   let optimizedBytes = 0;

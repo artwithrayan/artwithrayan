@@ -131,6 +131,13 @@
 .shine-button:hover, .shine-button[aria-pressed="true"] { background: var(--ink); color: var(--bg); }
 .original-art-image { background: transparent; border: 0; }
 .original-art-image img { object-fit: contain; background: transparent; }
+.rotating-art-image { position: relative; }
+/* Center the photograph on the artwork's center hole, not its white margins. */
+.rotating-art-image img { position: absolute; left: 50%; top: 50%; width: 100%; height: auto; translate: -51.1% -47.5%; transform-origin: 51.1% 47.5%; animation: sun-beam-rotation 120s linear infinite; animation-play-state: paused; }
+.rotating-art-image.is-rotating.rotation-in-view:not(.rotation-page-hidden) img { animation-play-state: running; }
+.rotation-button { width: 100%; margin-top: 8px; background: var(--bg); color: var(--ink); letter-spacing: 0; }
+.rotation-button:hover { background: var(--ink); color: var(--bg); }
+@keyframes sun-beam-rotation { to { transform: rotate(360deg); } }
 .view-products { width: 100%; margin-top: 8px; }
 .product-count { color: var(--muted); font-size: 12px; white-space: nowrap; }
 .product-choice-label { display: block; margin: 16px 0 6px; color: var(--muted); font-size: 12px; }

@@ -159,20 +159,43 @@ async function renderOriginals() {
 
       return `
         <article class="product-card original-card" data-original-id="${escapeHtml(art.id)}">
-          ${artworkImage(art, "original-art-image", art.revealImageUrl ? `data-standard-image="${escapeHtml(art.imageUrl)}" data-reveal-image="${escapeHtml(art.revealImageUrl)}"` : "")}
+          ${artworkImage(art, `original-art-image${art.id === "sun-beam" ? " rotating-art-image" : ""}`, art.revealImageUrl ? `data-standard-image="${escapeHtml(art.imageUrl)}" data-reveal-image="${escapeHtml(art.revealImageUrl)}"` : "")}
           <div class="product-info">
             <div class="product-title-row"><h3>${escapeHtml(art.title)}</h3>${art.status === "sold" ? '<span class="original-status">Sold</span>' : ""}</div>
             <p class="product-meta">${escapeHtml(art.medium)} · ${escapeHtml(art.size)} · ${escapeHtml(art.year)}</p>
             <p>${escapeHtml(art.description)}</p>
           </div>
           ${art.revealImageUrl ? `<button type="button" class="shine-button" data-id="${escapeHtml(art.id)}" aria-pressed="false">Shine a light</button>` : ""}
+          ${art.id === "sun-beam" ? '<button type="button" class="rotation-button" aria-label="Pause Sun Beam rotation" aria-pressed="true">Pause rotation</button>' : ""}
           ${isAvailable ? `<a class="button original-inquiry" href="${escapeHtml(inquiryUrl)}" aria-label="${escapeHtml(`Email if interested in purchasing ${art.title}`)}">Email if interested in purchasing</a><a class="original-contact-email" href="${escapeHtml(inquiryUrl)}">${escapeHtml(inquiryEmail)}</a>` : ""}
         </article>`;
     }).join("");
     attachRevealHandlers();
+    attachRotationHandlers();
   } catch (error) {
     grid.innerHTML = `<p class="notice error">Could not load originals. Make sure the backend is running.</p>`;
   }
+}
+
+function attachRotationHandlers() {
+  const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+  document.querySelectorAll(".rotation-button").forEach((button) => {
+    const image = button.closest(".original-card").querySelector(".rotating-art-image");
+    let rotating = !reducedMotion.matches;
+    const update = () => {
+      image.classList.toggle("is-rotating", rotating);
+      button.setAttribute("aria-pressed", String(rotating));
+      button.setAttribute("aria-label", `${rotating ? "Pause" : "Start"} Sun Beam rotation`);
+      button.textContent = rotating ? "Pause rotation" : "Rotate painting";
+    };
+    button.addEventListener("click", () => { rotating = !rotating; update(); });
+    reducedMotion.addEventListener("change", () => { rotating = !reducedMotion.matches; update(); });
+    if ("IntersectionObserver" in window) {
+      new IntersectionObserver(([entry]) => image.classList.toggle("rotation-in-view", entry.isIntersecting)).observe(image);
+    } else image.classList.add("rotation-in-view");
+    document.addEventListener("visibilitychange", () => image.classList.toggle("rotation-page-hidden", document.hidden));
+    update();
+  });
 }
 
 function attachRevealHandlers() {

@@ -260,6 +260,32 @@ test("a country metadata outage fails closed internationally but leaves US quote
   } finally { f.printful.getShippingCountries = countries; }
 });
 
+test("Sun Beam is added to existing catalogs without resetting availability on restart", () => {
+  const { spawnSync } = require("node:child_process");
+  const path = require("node:path");
+  const original = f.db.getOriginalById("sun-beam");
+  assert.equal(original.title, "Sun Beam");
+  assert.equal(original.medium, "Acrylic on LP vinyl");
+  assert.equal(original.size, "12-inch diameter");
+  assert.equal(original.widthIn, 12);
+  assert.equal(original.heightIn, 12);
+  assert.equal(original.autoChargeEnabled, false);
+  const reload = () => {
+    const result = spawnSync(process.execPath, ["-e", "require('./src/db')"], { cwd: path.resolve(__dirname, ".."), env: process.env, encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+  };
+  f.sql.prepare("DELETE FROM originals WHERE id='sun-beam'").run();
+  reload();
+  assert.equal(f.db.getOriginalById("sun-beam").status, "active");
+  const count = f.db.getOriginals().length;
+  try {
+    f.db.markOriginalSold("sun-beam");
+    reload();
+    assert.equal(f.db.getOriginalById("sun-beam").status, "sold");
+    assert.equal(f.db.getOriginals().length, count);
+  } finally { f.db.markOriginalStatus("sun-beam", "active"); }
+});
+
 test("original listings omit public prices while preserving internal records and the inquiry address", async () => {
   const storedOriginals = f.db.getOriginals();
   const catalog = await (await fetch(`${base}/api/originals`)).json();

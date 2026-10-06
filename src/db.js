@@ -395,6 +395,18 @@ if (db.prepare("SELECT COUNT(*) AS count FROM originals").get().count === 0) {
   db.transaction((items) => items.forEach((item) => insert.run(item)))(rows);
 }
 
+// Add new originals to existing persistent catalogs without resetting sale status.
+db.prepare(`
+  INSERT OR IGNORE INTO originals
+  (id,title,medium,size,year,description,price,starting_bid,bid_increment,ends_at,image_url,color_one,color_two,width_in,height_in,status,is_active,auto_charge_enabled)
+  VALUES
+  (@id,@title,@medium,@size,@year,@description,0,0,10,'2099-12-31T23:59:59.000Z',@imageUrl,'#173a2c','#d8d5a2',12,12,'active',1,0)
+`).run({
+  id: "sun-beam", title: "Sun Beam", medium: "Acrylic on LP vinyl", size: "12-inch diameter", year: "2026",
+  description: "An original circular painting of sunlight falling across a forest floor.",
+  imageUrl: "/images/sun-beam.jpeg"
+});
+
 function normalizeOriginalRow(row) {
   const parsed = parseSizeInches(row.size);
   const widthIn = row.width_in || parsed.widthIn;

@@ -26,7 +26,7 @@ async function main() {
         assert.equal((await page.goto(base + url)).status(), 200);
         await page.waitForLoadState("networkidle");
         for (const img of await page.locator("img").all()) {
-          await img.scrollIntoViewIfNeeded();
+          await img.locator("..").scrollIntoViewIfNeeded();
           await img.evaluate((element) => element.decode());
         }
         assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth + 1), false, `Overflow: ${url} at ${width}`);
@@ -68,6 +68,33 @@ async function main() {
         assert.ok(url.searchParams.get("body").includes("pricing"));
         assert.equal(await card.locator(".original-contact-email").innerText(), "artwithrayan@gmail.com");
       }
+
+      const sunBeam = page.locator('[data-original-id="sun-beam"]');
+      const rotatingImage = sunBeam.locator(".rotating-art-image img");
+      const rotationButton = sunBeam.locator(".rotation-button");
+      await sunBeam.locator(".rotating-art-image").scrollIntoViewIfNeeded();
+      await rotatingImage.evaluate((image) => image.decode());
+      await page.waitForFunction(() => getComputedStyle(document.querySelector(".rotating-art-image img")).animationPlayState === "running");
+      const firstTransform = await rotatingImage.evaluate((image) => getComputedStyle(image).transform);
+      await page.waitForTimeout(250);
+      assert.notEqual(await rotatingImage.evaluate((image) => getComputedStyle(image).transform), firstTransform);
+      await rotationButton.click();
+      assert.equal(await rotationButton.getAttribute("aria-pressed"), "false");
+      assert.equal(await rotatingImage.evaluate((image) => getComputedStyle(image).animationPlayState), "paused");
+      for (const [angle, time] of [[0, 0], [90, 30000], [180, 60000]]) {
+        await rotatingImage.evaluate((image, currentTime) => { image.getAnimations()[0].currentTime = currentTime; }, time);
+        await sunBeam.screenshot({ path: path.join(output, `sun-beam-${width}-${angle}.png`) });
+      }
+      await rotationButton.click();
+      assert.equal(await rotationButton.getAttribute("aria-pressed"), "true");
+      await page.emulateMedia({ reducedMotion: "reduce" });
+      await page.waitForFunction(() => document.querySelector(".rotation-button").getAttribute("aria-pressed") === "false");
+      assert.equal(await rotatingImage.evaluate((image) => getComputedStyle(image).animationPlayState), "paused");
+      await page.emulateMedia({ reducedMotion: "no-preference" });
+      await page.waitForFunction(() => document.querySelector(".rotation-button").getAttribute("aria-pressed") === "true");
+      await page.evaluate(() => scrollTo(0, 0));
+      if (width !== 1440) await page.waitForFunction(() => getComputedStyle(document.querySelector(".rotating-art-image img")).animationPlayState === "paused");
+      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth + 1), false);
 
       await page.goto(base + "/prints.html");
       await page.locator(".view-products").first().click();
@@ -171,7 +198,7 @@ async function main() {
       assert.equal(await dialog.locator(".print-product-note").count(), 0);
       await page.unroute("**/api/prints");
       assert.deepEqual(errors, []);
-      results.push({ width, checkoutInvalidation: true, staleResponseIgnored: true, reveal: true, originalEmailInquiries: true, internationalAddresses: true, lightPrintNote: true });
+      results.push({ width, checkoutInvalidation: true, staleResponseIgnored: true, reveal: true, originalEmailInquiries: true, internationalAddresses: true, lightPrintNote: true, sunBeamRotation: true });
       await context.close();
     }
     const manifest = require("node:vm").runInNewContext(await fs.readFile(path.resolve(__dirname, "../public/image-assets.js"), "utf8") + ";window.ART_IMAGE_ASSETS", { window: {} });
