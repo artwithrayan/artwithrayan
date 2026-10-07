@@ -162,7 +162,8 @@ async function renderOriginals() {
           ${artworkImage(art, `original-art-image${art.id === "sun-beam" ? " rotating-art-image" : ""}`, art.revealImageUrl ? `data-standard-image="${escapeHtml(art.imageUrl)}" data-reveal-image="${escapeHtml(art.revealImageUrl)}"` : "")}
           <div class="product-info">
             <div class="product-title-row"><h3>${escapeHtml(art.title)}</h3>${art.status === "sold" ? '<span class="original-status">Sold</span>' : ""}</div>
-            <p class="product-meta">${escapeHtml(art.medium)} · ${escapeHtml(art.size)} · ${escapeHtml(art.year)}</p>
+            <p class="product-meta">${[art.medium, art.size, art.year].filter(Boolean).map(escapeHtml).join(" · ")}</p>
+            ${art.isCommission ? '<p class="commission-label">Commissioned work</p>' : ""}
             <p>${escapeHtml(art.description)}</p>
           </div>
           ${art.revealImageUrl ? `<button type="button" class="shine-button" data-id="${escapeHtml(art.id)}" aria-pressed="false">Shine a light</button>` : ""}

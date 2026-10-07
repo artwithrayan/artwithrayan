@@ -206,6 +206,7 @@ function updateSiteContent(content) {
 ensureColumn("originals", "status", "TEXT NOT NULL DEFAULT 'active'");
 ensureColumn("originals", "price", "INTEGER NOT NULL DEFAULT 1");
 ensureColumn("originals", "reveal_image_url", "TEXT");
+ensureColumn("originals", "is_commission", "INTEGER NOT NULL DEFAULT 0");
 db.prepare("UPDATE originals SET price=starting_bid WHERE price IS NULL OR price <= 1").run();
 ensureColumn("originals", "width_in", "REAL");
 ensureColumn("originals", "height_in", "REAL");
@@ -407,6 +408,18 @@ db.prepare(`
   imageUrl: "/images/sun-beam.jpeg"
 });
 
+db.prepare(`
+  INSERT OR IGNORE INTO originals
+  (id,title,medium,size,year,description,price,starting_bid,bid_increment,ends_at,image_url,color_one,color_two,status,is_active,auto_charge_enabled,is_commission)
+  VALUES
+  ('jazz-club','Jazz Club','Original painting','','','A live jazz performance in an intimate, warmly lit club.',0,0,10,'2099-12-31T23:59:59.000Z','/images/jazz-club.jpg','#36241e','#ac783d','sold',1,0,1)
+`).run();
+
+db.prepare(`
+  UPDATE originals SET is_commission=1
+  WHERE id IN ('wine-night','dogs-playing-poker-original') AND is_commission=0
+`).run();
+
 function normalizeOriginalRow(row) {
   const parsed = parseSizeInches(row.size);
   const widthIn = row.width_in || parsed.widthIn;
@@ -421,6 +434,7 @@ function normalizeOriginalRow(row) {
     size: row.size,
     year: row.year,
     description: row.description,
+    isCommission: Boolean(row.is_commission),
     price: row.price || row.starting_bid,
     startingBid: row.starting_bid,
     bidIncrement: row.bid_increment,

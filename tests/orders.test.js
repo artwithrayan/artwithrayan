@@ -286,6 +286,37 @@ test("Sun Beam is added to existing catalogs without resetting availability on r
   } finally { f.db.markOriginalStatus("sun-beam", "active"); }
 });
 
+test("sold commissions are added to existing catalogs without changing other originals", () => {
+  const { spawnSync } = require("node:child_process");
+  const path = require("node:path");
+  const ids = ["jazz-club", "wine-night", "dogs-playing-poker-original"];
+  for (const id of ids) {
+    assert.equal(f.db.getOriginalById(id).isCommission, true);
+    assert.equal(f.db.getOriginalById(id).status, "sold");
+  }
+  const before = f.db.getOriginals().filter((art) => !ids.includes(art.id));
+  f.sql.prepare("DELETE FROM originals WHERE id='jazz-club'").run();
+  f.sql.prepare("UPDATE originals SET is_commission=0 WHERE id IN ('wine-night','dogs-playing-poker-original')").run();
+  for (let run = 0; run < 2; run++) {
+    const result = spawnSync(process.execPath, ["-e", "require('./src/db')"], { cwd: path.resolve(__dirname, ".."), env: process.env, encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+  }
+  const catalog = f.db.getOriginals();
+  assert.deepEqual(catalog.filter((art) => !ids.includes(art.id)), before);
+  assert.equal(catalog.filter((art) => art.id === "jazz-club").length, 1);
+  for (const id of ids) {
+    assert.equal(f.db.getOriginalById(id).isCommission, true);
+    assert.equal(f.db.getOriginalById(id).status, "sold");
+  }
+  const jazz = f.db.getOriginalById("jazz-club");
+  assert.equal(jazz.title, "Jazz Club");
+  assert.equal(jazz.imageUrl, "/images/jazz-club.jpg");
+  assert.equal(jazz.autoChargeEnabled, false);
+  assert.equal(catalog[0].id, "the-light");
+  const firstSold = catalog.findIndex((art) => art.status === "sold");
+  assert.ok(catalog.slice(firstSold).every((art) => art.status === "sold"));
+});
+
 test("original listings omit public prices while preserving internal records and the inquiry address", async () => {
   const storedOriginals = f.db.getOriginals();
   const catalog = await (await fetch(`${base}/api/originals`)).json();

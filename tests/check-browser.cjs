@@ -49,6 +49,11 @@ async function main() {
         const card = page.locator(`[data-original-id="${art.id}"]`);
         assert.equal(await card.locator(".price").count(), 0);
         assert.doesNotMatch(await card.innerText(), /\$\s*\d/);
+        assert.equal(await card.locator(".commission-label").count(), art.isCommission ? 1 : 0);
+        if (art.isCommission) {
+          assert.equal(await card.locator(".commission-label").isVisible(), true);
+          assert.equal(await card.locator(".commission-label").innerText(), "Commissioned work");
+        }
         assert.match(await card.locator(".product-meta").innerText(), new RegExp(art.size.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
         const inquiry = card.locator(".original-inquiry");
         if (art.status === "sold") {

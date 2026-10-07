@@ -126,6 +126,7 @@
 .original-inquiry:focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; }
 .original-contact-email { display: block; margin-top: 10px; color: var(--muted); font-size: 12px; line-height: 1.5; text-decoration: underline; overflow-wrap: anywhere; }
 .original-card .product-info > .product-meta { display: block; }
+.original-card .product-info > .commission-label { display: block; font-size: 12px; font-weight: 600; color: var(--ink); }
 .original-status { white-space: nowrap; font-weight: 600; }
 .shine-button { width: 100%; margin-top: 8px; background: var(--bg); color: var(--ink); border-color: var(--ink); }
 .shine-button:hover, .shine-button[aria-pressed="true"] { background: var(--ink); color: var(--bg); }
