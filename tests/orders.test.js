@@ -20,14 +20,72 @@ test("payment records preserve cents", () => {
   assert.equal(payment.total_amount, 21.75);
   assert.equal(payment.shipping_amount, 4.99);
 });
-test("auction writes reject cross-site requests and require an authenticated bidder", async () => {
-  assert.equal((await fetch(base + "/api/auctions/the-light/quote", { method: "POST", headers: { "Content-Type": "application/json", origin: "https://attacker.invalid" }, body: "{}" })).status, 403);
-  assert.equal((await fetch(base + "/api/auctions/the-light/quote", { method: "POST", headers: { "Content-Type": "application/json", origin: "http://localhost:3000" }, body: "{}" })).status, 401);
-  const response = await fetch(base + "/api/auctions");
-  assert.equal(response.headers.get("cache-control"), "no-store");
-  assert.deepEqual(await response.json(), { auctions: [] });
+test("retired auctions expose no bidding, card setup, or auction pages", async () => {
+  const before = { ...f.calls };
+  for (const route of ["/api/auctions", "/api/auctions/login", "/api/auctions/verify", "/api/auctions/the-light", "/api/auctions/the-light/quote", "/api/auctions/the-light/authorize", "/api/auctions/the-light/refresh"]) {
+    for (const method of ["GET", "POST"]) {
+      assert.equal((await fetch(base + route, { method })).status, 410, method + " " + route);
+    }
+  }
+  for (const route of ["/auction.html", "/auction.js", "/auction-rules.html", "/api/bidders/register", "/api/originals/the-light/bids", "/api/admin/auctions/process-ended", "/api/admin/originals/the-light/auto-charge-winner"]) {
+    assert.equal((await fetch(base + route)).status, 404, route);
+    assert.equal((await fetch(base + route, { method: "POST" })).status, 404, route);
+  }
+  const catalog = await (await fetch(base + "/api/originals")).json();
+  for (const art of catalog.originals) {
+    for (const field of ["auction", "startingBid", "bidIncrement", "endsAt", "autoChargeEnabled"]) assert.equal(field in art, false, field);
+  }
+  assert.deepEqual(f.calls, before);
   assert.equal((await fetch(base + "/api/bidders")).status, 404);
   assert.equal((await fetch(base + "/api/admin/originals")).status, 404);
+});
+
+test("retired auction webhooks are acknowledged without processing payments", async () => {
+  const payment = f.payment("cs_retired_auction", "original");
+  const before = { ...f.calls };
+  for (const [type, fields] of [
+    ["checkout.session.completed", { mode: "setup", setup_intent: "seti_retired" }],
+    ["checkout.session.completed", { metadata: { flow: "art_auction_payment" } }],
+    ["checkout.session.expired", { metadata: { flow: "art_auction_setup" } }],
+    ["checkout.session.completed", { metadata: { kind: "original", bidId: "1" } }],
+    ["payment_intent.succeeded", { metadata: { flow: "art_auction_payment" } }],
+    ["payment_intent.payment_failed", { metadata: { kind: "original_auction_auto_charge" } }]
+  ]) {
+    const response = await webhook(type, { ...f.sessions.get("cs_retired_auction"), ...fields });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { received: true, handled: false });
+    assert.equal(f.db.getPaymentById(payment.id).status, "pending");
+  }
+  f.sql.prepare("UPDATE payments SET checkout_expires_at=1 WHERE id=?").run(payment.id);
+  f.sessions.get("cs_retired_auction").metadata = { flow: "art_auction_payment" };
+  await f.orders.tick();
+  assert.equal(f.db.getPaymentById(payment.id).status, "pending");
+  assert.deepEqual(f.calls, before);
+});
+
+test("database startup preserves historical auction tables without initializing new ones", () => {
+  const Database = require("better-sqlite3");
+  const { spawnSync } = require("node:child_process");
+  const path = require("node:path");
+  const retiredTables = ["art_auctions", "auction_accounts", "auction_logins", "auction_sessions", "auction_entries", "auction_mail", "auction_charge_attempts", "bidders", "bids"];
+  for (const name of retiredTables) {
+    assert.equal(f.sql.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(name), undefined);
+  }
+  const historicalPath = path.join(f.tempDir, "historical.sqlite");
+  const historical = new Database(historicalPath);
+  try {
+    for (const name of retiredTables) {
+      historical.exec(`CREATE TABLE ${name} (id TEXT PRIMARY KEY, history TEXT)`);
+      historical.prepare(`INSERT INTO ${name} VALUES (?, ?)`).run("preserve", "historical record");
+    }
+    const result = spawnSync(process.execPath, ["-e", "require('./src/db')"], {
+      cwd: path.resolve(__dirname, ".."), env: { ...process.env, DB_PATH: historicalPath }, encoding: "utf8"
+    });
+    assert.equal(result.status, 0, result.stderr);
+    for (const name of retiredTables) {
+      assert.deepEqual(historical.prepare(`SELECT * FROM ${name}`).all(), [{ id: "preserve", history: "historical record" }]);
+    }
+  } finally { historical.close(); }
 });
 
 test("private files cannot be requested and browser policy restricts script origins", async () => {
@@ -309,7 +367,7 @@ test("Sun Beam is added to existing catalogs without resetting availability on r
   assert.equal(original.size, "12-inch diameter");
   assert.equal(original.widthIn, 12);
   assert.equal(original.heightIn, 12);
-  assert.equal(original.autoChargeEnabled, false);
+  assert.equal(Object.hasOwn(original, "autoChargeEnabled"), false);
   const reload = () => {
     const result = spawnSync(process.execPath, ["-e", "require('./src/db')"], { cwd: path.resolve(__dirname, ".."), env: process.env, encoding: "utf8" });
     assert.equal(result.status, 0, result.stderr);
@@ -351,7 +409,7 @@ test("sold commissions are added to existing catalogs without changing other ori
   const jazz = f.db.getOriginalById("jazz-club");
   assert.equal(jazz.title, "Jazz Club");
   assert.equal(jazz.imageUrl, "/images/jazz-club.jpg");
-  assert.equal(jazz.autoChargeEnabled, false);
+  assert.equal(Object.hasOwn(jazz, "autoChargeEnabled"), false);
   assert.equal(catalog[0].id, "the-light");
   const firstSold = catalog.findIndex((art) => art.status === "sold");
   assert.ok(catalog.slice(firstSold).every((art) => art.status === "sold"));

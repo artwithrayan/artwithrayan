@@ -61,10 +61,22 @@ async function main() {
         const inquiry = card.locator(".original-inquiry");
         if (art.status === "sold") {
           assert.equal(await inquiry.count(), 0);
+          assert.equal(await card.locator(".original-ebay-auction").count(), 0);
           assert.equal(await card.locator(".original-status").innerText(), "Sold");
           continue;
         }
         assert.equal(await card.locator(".original-status").count(), 0);
+        if (art.id === "sun-beam") {
+          const ebay = card.getByRole("link", { name: "Bid on Sun Beam on eBay (opens in a new tab)", exact: true });
+          assert.equal(await ebay.textContent(), "Bid on eBay");
+          assert.equal(await ebay.getAttribute("href"), "https://ebay.io/m/WRlkwy");
+          assert.equal(await ebay.getAttribute("target"), "_blank");
+          assert.equal(await ebay.getAttribute("rel"), "noopener noreferrer");
+          assert.equal(await inquiry.count(), 0);
+          assert.equal(await card.locator(".original-contact-email, .original-shipping").count(), 0);
+          continue;
+        }
+        assert.equal(await card.locator(".original-ebay-auction").count(), 0);
         assert.equal(await inquiry.textContent(), "Email if interested in purchasing");
         const url = new URL(await inquiry.getAttribute("href"));
         assert.equal(url.protocol, "mailto:");
@@ -78,7 +90,7 @@ async function main() {
       }
 
       const lightShipping = page.locator('[data-original-id="the-light"] .original-shipping');
-      assert.equal(await page.locator(".original-shipping").count(), 2);
+      assert.equal(await page.locator(".original-shipping").count(), 1);
       await lightShipping.locator("summary").click();
       await lightShipping.locator('[name="state"]').selectOption("NC");
       await lightShipping.locator("button").click();

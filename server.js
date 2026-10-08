@@ -14,7 +14,7 @@ const db = require("./src/db");
 const email = require("./src/email");
 const printful = require("./src/printful");
 const sheets = require("./src/google-sheets");
-const { estimateOriginalShipping, estimateSelfFulfillmentShipping, hasOriginalShippingProfile, estimateOriginalDestinationShipping } = require("./src/shipping");
+const { estimateSelfFulfillmentShipping, hasOriginalShippingProfile, estimateOriginalDestinationShipping } = require("./src/shipping");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -22,10 +22,6 @@ const BASE_URL = process.env.BASE_URL || `http://localhost:${PORT}`;
 const stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SECRET_KEY, { timeout: 20000, maxNetworkRetries: 1 }) : null;
 const { createOrderProcessor } = require("./src/order-processing");
 const orders = createOrderProcessor({ db, stripe, printful, sheets, email });
-const { createAuctionService } = require("./src/auctions");
-const auctions = createAuctionService({ db, stripe, email, orders, baseUrl: BASE_URL.replace(/\/$/, "") });
-auctions.configure(require("./config/auctions.json"));
-const AUTO_CHARGE_AUCTIONS = false;
 const STRIPE_CARD_PERCENT = 0.029;
 const STRIPE_CARD_FIXED_CENTS = 30;
 const ORIGINAL_INQUIRY_EMAIL = "artwithrayan@gmail.com";
@@ -65,81 +61,6 @@ const checkoutRateLimit = rateLimit({
   legacyHeaders: false,
   message: { error: "Too many checkout attempts. Please wait and try again." }
 });
-
-function slugifyId(value) {
-  return String(value || "")
-    .toLowerCase()
-    .replace(/&/g, "and")
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 70) || `art-${Date.now()}`;
-}
-
-function cleanNumber(value, fallback = null) {
-  if (value === undefined || value === null || value === "") return fallback;
-  const number = Number(value);
-  return Number.isFinite(number) ? number : fallback;
-}
-
-function validateOriginalPayload(body, { allowMissingId = false } = {}) {
-  const statusOptions = new Set(["draft", "active", "sold", "cancelled", "ended_no_bids", "auto_charge_failed", "payment_pending"]);
-  const title = String(body.title || "").trim();
-  const id = allowMissingId ? String(body.id || slugifyId(title)).trim() : String(body.id || "").trim();
-  const medium = String(body.medium || "").trim();
-  const size = String(body.size || "").trim();
-  const year = String(body.year || new Date().getFullYear()).trim();
-  const description = String(body.description || "").trim();
-  const price = cleanNumber(body.price ?? body.startingBid);
-  const startingBid = price;
-  const bidIncrement = cleanNumber(body.bidIncrement, 10);
-  const endsAt = String(body.endsAt || "2099-12-31T23:59:59.000Z").trim();
-  const imageUrl = String(body.imageUrl || "").trim();
-  const revealImageUrl = String(body.revealImageUrl || "").trim();
-  const colorOne = String(body.colorOne || "#f4f4f4").trim();
-  const colorTwo = String(body.colorTwo || "#d8d8d8").trim();
-  const widthIn = cleanNumber(body.widthIn);
-  const heightIn = cleanNumber(body.heightIn);
-  const depthIn = cleanNumber(body.depthIn, 2);
-  const weightLb = cleanNumber(body.weightLb);
-  const status = statusOptions.has(String(body.status || "draft")) ? String(body.status || "draft") : "draft";
-
-  if (!id || !/^[a-z0-9-]{2,80}$/.test(id)) throw new Error("Artwork ID must be lowercase letters, numbers, and hyphens only.");
-  if (title.length < 2) throw new Error("Title is required.");
-  if (medium.length < 2) throw new Error("Medium is required.");
-  if (size.length < 2) throw new Error("Size is required, for example 18 × 24 in.");
-  if (description.length < 5) throw new Error("Description is required.");
-  if (!Number.isFinite(price) || price < 1) throw new Error("Price must be at least $1.");
-  if (imageUrl && !validator.isURL(imageUrl, { require_protocol: true })) throw new Error("Image URL must begin with https:// or http://.");
-  if (revealImageUrl && !validator.isURL(revealImageUrl, { require_protocol: true }) && !revealImageUrl.startsWith("/")) throw new Error("Reveal image URL must begin with https://, http://, or /.");
-  if (widthIn !== null && widthIn <= 0) throw new Error("Width must be positive.");
-  if (heightIn !== null && heightIn <= 0) throw new Error("Height must be positive.");
-  if (depthIn !== null && depthIn <= 0) throw new Error("Depth must be positive.");
-  if (weightLb !== null && weightLb <= 0) throw new Error("Weight must be positive.");
-
-  return {
-    id,
-    title,
-    medium,
-    size,
-    year,
-    description,
-    price,
-    startingBid,
-    bidIncrement,
-    endsAt,
-    imageUrl,
-    revealImageUrl,
-    colorOne,
-    colorTwo,
-    widthIn,
-    heightIn,
-    depthIn,
-    weightLb,
-    status,
-    autoChargeEnabled: body.autoChargeEnabled !== false && body.autoChargeEnabled !== "false"
-  };
-}
-
 
 const footerScriptHash = crypto.createHash("sha256").update('document.getElementById("year").textContent = new Date().getFullYear();').digest("base64");
 app.use(helmet({ contentSecurityPolicy: { directives: {
@@ -185,195 +106,6 @@ function requireAdmin(req, res) {
   return res.status(404).json({ error: "Admin tools are disabled." });
 }
 
-async function processSingleAuctionAutoCharge(art, { force = false, selectedBid = null } = {}) {
-  if (!stripe) throw new Error("Stripe is not configured.");
-
-  const now = new Date();
-  const auctionEnd = new Date(art.endsAt);
-
-  if (!force && now < auctionEnd) {
-    return { skipped: true, reason: "Auction has not ended yet.", originalId: art.id };
-  }
-
-  if (!force && art.status !== "active") {
-    return { skipped: true, reason: `Auction status is ${art.status}.`, originalId: art.id };
-  }
-
-  const winningBid = selectedBid || db.getWinningBid(art.id);
-  if (!winningBid) {
-    return { skipped: true, reason: "No winning bid.", originalId: art.id };
-  }
-
-  const bidder = winningBid.bidder_id ? db.getBidderById(winningBid.bidder_id) : db.getBidderByEmail(winningBid.bidder_email);
-
-  if (!bidder) {
-    db.markOriginalAutoChargeFailed(art.id);
-    return { failed: true, reason: "Winning bidder was not found.", originalId: art.id };
-  }
-
-  if (bidder.blocked) {
-    db.markOriginalAutoChargeFailed(art.id);
-    return { failed: true, reason: "Winning bidder is blocked.", originalId: art.id };
-  }
-
-  if (!bidder.email || !validator.isEmail(bidder.email)) {
-    db.markOriginalAutoChargeFailed(art.id);
-    return { failed: true, reason: "Winning bidder does not have a valid email.", originalId: art.id };
-  }
-
-  if (!bidder.stripeCustomerId || !bidder.stripePaymentMethodId || !bidder.autoChargeAuthorized) {
-    db.markOriginalAutoChargeFailed(art.id);
-    return { failed: true, reason: "Winning bidder is missing saved Stripe payment authorization.", originalId: art.id };
-  }
-
-  const existingPaid = db.getPaidPaymentForOriginal(art.id);
-  if (existingPaid) {
-    return { skipped: true, reason: "Original is already paid.", originalId: art.id };
-  }
-
-  const shippingEstimate = estimateOriginalShipping(art);
-  const subtotalAmount = Math.round(winningBid.amount);
-  const shippingAmount = Math.round(shippingEstimate.total);
-  const totalAmount = subtotalAmount + shippingAmount;
-
-  const attempt = db.createAutoChargeAttempt({
-    originalId: art.id,
-    bidId: winningBid.id,
-    bidderId: bidder.id,
-    subtotalAmount,
-    shippingAmount,
-    totalAmount
-  });
-
-  if (!attempt && !force) {
-    return { skipped: true, reason: "This winning bid was already processed or attempted.", originalId: art.id };
-  }
-
-  db.markOriginalAutoChargeProcessing(art.id);
-
-  try {
-    const paymentIntent = await stripe.paymentIntents.create({
-      amount: totalAmount * 100,
-      currency: "usd",
-      customer: bidder.stripeCustomerId,
-      payment_method: bidder.stripePaymentMethodId,
-      off_session: true,
-      confirm: true,
-      description: `Auction win: ${art.title}`,
-      receipt_email: bidder.email,
-      shipping: {
-        name: bidder.shippingName || bidder.name,
-        address: {
-          line1: bidder.shippingLine1 || undefined,
-          line2: bidder.shippingLine2 || undefined,
-          city: bidder.shippingCity || undefined,
-          state: bidder.shippingState || undefined,
-          postal_code: bidder.shippingPostalCode || undefined,
-          country: bidder.shippingCountry || "US"
-        }
-      },
-      metadata: {
-        kind: "original_auction_auto_charge",
-        originalId: art.id,
-        bidId: String(winningBid.id),
-        bidderId: String(bidder.id || ""),
-        subtotalAmount: String(subtotalAmount),
-        shippingAmount: String(shippingAmount),
-        totalAmount: String(totalAmount),
-        shippingPackageType: shippingEstimate.packageType
-      }
-    });
-
-    const paid = paymentIntent.status === "succeeded";
-    const paymentStatus = paid ? "paid" : paymentIntent.status;
-
-    const payment = db.createPayment({
-      kind: "original",
-      originalId: art.id,
-      bidId: winningBid.id,
-      bidderId: bidder.id,
-      stripeSessionId: paymentIntent.id,
-      stripePaymentIntentId: paymentIntent.id,
-      checkoutUrl: `https://dashboard.stripe.com/test/payments/${paymentIntent.id}`,
-      customerName: bidder.name,
-      customerEmail: bidder.email,
-      subtotalAmount,
-      shippingAmount,
-      totalAmount,
-      amount: totalAmount,
-      shippingJson: shippingEstimate,
-      status: paymentStatus
-    });
-
-    db.updateAutoChargeAttempt({
-      attemptId: attempt?.id,
-      status: paymentStatus,
-      stripePaymentIntentId: paymentIntent.id
-    });
-
-    if (paid) {
-      db.markOriginalSold(art.id);
-    } else {
-      db.markOriginalPaymentPending(art.id);
-    }
-
-    return { charged: paid, status: paymentStatus, originalId: art.id, paymentIntentId: paymentIntent.id, payment };
-  } catch (error) {
-    const reason = error.message || "Automatic charge failed.";
-    db.markOriginalAutoChargeFailed(art.id);
-    if (attempt?.id) {
-      db.updateAutoChargeAttempt({
-        attemptId: attempt.id,
-        status: "failed",
-        stripePaymentIntentId: error.payment_intent?.id || null,
-        failureReason: reason
-      });
-    }
-
-    db.createPayment({
-      kind: "original",
-      originalId: art.id,
-      bidId: winningBid.id,
-      bidderId: bidder.id,
-      stripeSessionId: error.payment_intent?.id || `failed-auto-charge-${art.id}-${winningBid.id}-${Date.now()}`,
-      stripePaymentIntentId: error.payment_intent?.id || null,
-      checkoutUrl: "",
-      customerName: bidder.name,
-      customerEmail: bidder.email,
-      subtotalAmount,
-      shippingAmount,
-      totalAmount,
-      amount: totalAmount,
-      shippingJson: shippingEstimate,
-      status: error.code === "authentication_required" ? "requires_action" : "failed",
-      failureReason: reason
-    });
-
-    return { failed: true, reason, originalId: art.id };
-  }
-}
-
-async function processEndedAuctions({ forceOriginalId = null, force = false } = {}) {
-  if (!AUTO_CHARGE_AUCTIONS && !force) {
-    return { skipped: true, reason: "AUTO_CHARGE_AUCTIONS=false" };
-  }
-
-  if (!stripe) {
-    return { skipped: true, reason: "Stripe is not configured." };
-  }
-
-  const originals = forceOriginalId
-    ? [db.getOriginalById(forceOriginalId)].filter(Boolean)
-    : db.getEndedActiveOriginalsForAutoCharge();
-
-  const results = [];
-  for (const art of originals) {
-    results.push(await processSingleAuctionAutoCharge(art, { force }));
-  }
-
-  return { processedCount: results.length, results };
-}
-
 // Stripe webhooks must receive the raw body.
 app.post("/api/stripe/webhook", express.raw({ type: "application/json" }), async (req, res) => {
   if (!requireStripe(res)) return;
@@ -390,7 +122,11 @@ app.post("/api/stripe/webhook", express.raw({ type: "application/json" }), async
 
   try {
     logger.log(`[stripe webhook] received ${event.type}${event.data?.object?.id ? ` (${event.data.object.id})` : ""}`);
-    if (await auctions.webhook(event)) return res.json({ received: true });
+    // Acknowledge retired auction events without modifying cards, orders, or inventory.
+    const eventObject = event.data?.object;
+    if (String(eventObject?.metadata?.kind || "").includes("auction") || String(eventObject?.metadata?.flow || "").startsWith("art_auction_") || eventObject?.metadata?.bidId || eventObject?.mode === "setup") {
+      return res.json({ received: true, handled: false });
+    }
     if (event.type === "checkout.session.expired" || event.type === "checkout.session.async_payment_failed") {
       const expiredSession = event.data.object;
       let expiredPayment = db.getPaymentByStripeSessionId(expiredSession.id);
@@ -404,42 +140,6 @@ app.post("/api/stripe/webhook", express.raw({ type: "application/json" }), async
 
     if (event.type === "checkout.session.completed" || event.type === "checkout.session.async_payment_succeeded") {
       const session = event.data.object;
-
-      if (session.mode === "setup") {
-        const setupIntent = await stripe.setupIntents.retrieve(session.setup_intent);
-        const bidder = db.markBidderSetupComplete({
-          stripeSessionId: session.id,
-          stripeSetupIntentId: session.setup_intent,
-          stripeCustomerId: session.customer,
-          stripePaymentMethodId: setupIntent.payment_method
-        });
-
-        if (bidder) {
-          await stripe.customers.update(bidder.stripeCustomerId, {
-            invoice_settings: { default_payment_method: bidder.stripePaymentMethodId },
-            address: {
-              line1: bidder.shippingLine1 || undefined,
-              line2: bidder.shippingLine2 || undefined,
-              city: bidder.shippingCity || undefined,
-              state: bidder.shippingState || undefined,
-              postal_code: bidder.shippingPostalCode || undefined,
-              country: bidder.shippingCountry || "US"
-            },
-            shipping: {
-              name: bidder.shippingName || bidder.name,
-              address: {
-                line1: bidder.shippingLine1 || undefined,
-                line2: bidder.shippingLine2 || undefined,
-                city: bidder.shippingCity || undefined,
-                state: bidder.shippingState || undefined,
-                postal_code: bidder.shippingPostalCode || undefined,
-                country: bidder.shippingCountry || "US"
-              }
-            }
-          });
-
-        }
-      }
 
       if (session.mode === "payment") {
         if (session.payment_status !== "paid") return res.json({ received: true, awaitingPayment: true });
@@ -500,55 +200,7 @@ app.post("/api/printful/webhook", express.json(), async (req, res) => {
 });
 
 app.use(express.json());
-const auctionWriteLimit = rateLimit({ windowMs: 15 * 60 * 1000, limit: 40, standardHeaders: "draft-8", legacyHeaders: false });
-const auctionLoginLimit = rateLimit({ windowMs: 15 * 60 * 1000, limit: 10, standardHeaders: "draft-8", legacyHeaders: false });
-app.use("/api/auctions", (req, res, next) => {
-  res.setHeader("Cache-Control", "no-store");
-  if (req.method !== "GET" && req.get("origin") !== new URL(BASE_URL).origin) return res.status(403).json({ error: "Please submit from this website." });
-  const session = String(req.headers.cookie || "").split(";").map((part) => part.trim()).find((part) => part.startsWith("auction_session="))?.slice(16);
-  req.auctionUser = auctions.authenticate(session);
-  req.auctionSession = session;
-  next();
-});
-const auctionHandler = (fn) => async (req, res) => {
-  try { await fn(req, res); }
-  catch (error) {
-    logger.error(`[auction request] ${error.message}`);
-    res.status(error.statusCode || 503).json({ error: error.statusCode && error.statusCode < 500 ? publicErrorMessage(error) : "Auction service temporarily unavailable. Please try again." });
-  }
-};
-const auctionUser = (req) => {
-  if (!req.auctionUser) throw Object.assign(new Error("Verify your email to continue."), { statusCode: 401 });
-  return req.auctionUser;
-};
-app.get("/api/auctions", (req, res) => res.json({ auctions: auctions.list() }));
-app.post("/api/auctions/login", auctionLoginLimit, auctionHandler(async (req, res) => res.json(await auctions.requestCode(req.body.email))));
-app.post("/api/auctions/logout", auctionWriteLimit, (req, res) => {
-  auctions.logout(req.auctionSession);
-  res.clearCookie("auction_session", { path: "/api/auctions" });
-  res.json({ signedOut: true });
-});
-app.post("/api/auctions/verify", auctionWriteLimit, auctionHandler(async (req, res) => {
-  const session = auctions.verifyCode(req.body.challenge, req.body.code);
-  res.cookie("auction_session", session, { httpOnly: true, secure: BASE_URL.startsWith("https:"), sameSite: "strict", path: "/api/auctions", maxAge: 7 * 86400000 });
-  res.json({ verified: true });
-}));
-app.get("/api/auctions/:id", auctionHandler(async (req, res) => {
-  const auction = auctions.get(req.params.id);
-  if (!auction) return res.status(404).json({ error: "Auction not found." });
-  const original = db.getOriginalById(auction.original_id);
-  res.json({ auction: auctions.publicAuction(auction, req.auctionUser), original: publicOriginalDetails(original), email: req.auctionUser?.email || null });
-}));
-app.post("/api/auctions/:id/refresh", auctionWriteLimit, auctionHandler(async (req, res) => {
-  await auctions.refreshSetup(auctionUser(req), req.params.id);
-  res.json({ refreshed: true });
-}));
-app.post("/api/auctions/:id/quote", auctionWriteLimit, auctionHandler(async (req, res) => res.json(auctions.quote(req.params.id, auctionUser(req), req.body))));
-app.post("/api/auctions/:id/authorize", auctionWriteLimit, auctionHandler(async (req, res) => {
-  const entry = db.sqlite.prepare("SELECT auction_id FROM auction_entries WHERE id=?").get(String(req.body.quoteId || ""));
-  if (entry?.auction_id !== req.params.id) return res.status(404).json({ error: "Bid review not found." });
-  res.json(await auctions.authorize(auctionUser(req), req.body.quoteId, req.body.agreed));
-}));
+app.use("/api/auctions", (req, res) => res.status(410).json({ error: "Website auctions are no longer available." }));
 app.use("/api/admin", (req, res) => res.status(404).json({ error: "Admin tools are disabled." }));
 app.use("/api/bidders", (req, res) => res.status(404).json({ error: "Bidding is no longer available." }));
 app.use("/api/originals/:id/bids", (req, res) => res.status(404).json({ error: "Bidding is no longer available." }));
@@ -571,7 +223,7 @@ app.get("/api/health", (req, res) => res.json({
 app.get("/api/site-content", (req, res) => res.json({ content: db.getSiteContent() }));
 
 function publicOriginalDetails({ price, startingBid, ...art }) {
-  return { ...art, auction: auctions.forOriginal(art.id), canEstimateShipping: hasOriginalShippingProfile(art.id) && ["active", "payment_pending"].includes(art.status) };
+  return { ...art, canEstimateShipping: hasOriginalShippingProfile(art.id) && ["active", "payment_pending"].includes(art.status) };
 }
 
 app.get("/api/originals", (req, res) => {
@@ -640,125 +292,6 @@ app.post("/api/print-club/checkout", checkoutRateLimit, async (req, res) => {
     logger.error("[print club checkout]", error);
     res.status(502).json({ error: "Could not open Print Club checkout. Please try again." });
   }
-});
-
-app.post("/api/bidders/register", async (req, res) => {
-  if (!requireStripe(res)) return;
-
-  const name = String(req.body.name || "").trim();
-  const emailAddress = String(req.body.email || "").trim().toLowerCase();
-  const phone = String(req.body.phone || "").trim();
-  const location = String(req.body.location || "").trim();
-  const acceptedTerms = Boolean(req.body.acceptedTerms);
-  const autoChargeAuthorized = Boolean(req.body.autoChargeAuthorized);
-  const shippingLine1 = String(req.body.shippingLine1 || "").trim();
-  const shippingLine2 = String(req.body.shippingLine2 || "").trim();
-  const shippingCity = String(req.body.shippingCity || "").trim();
-  const shippingState = String(req.body.shippingState || "").trim();
-  const shippingPostalCode = String(req.body.shippingPostalCode || "").trim();
-  const shippingCountry = String(req.body.shippingCountry || "US").trim().toUpperCase();
-
-  if (name.length < 2) return res.status(400).json({ error: "Please enter your name." });
-  if (!validator.isEmail(emailAddress)) return res.status(400).json({ error: "A valid email is required to bid and receive receipts." });
-  if (!acceptedTerms) return res.status(400).json({ error: "You must agree to the auction terms before registering to bid." });
-  if (!autoChargeAuthorized) return res.status(400).json({ error: "You must authorize automatic charging if you win before registering to bid." });
-  if (!shippingLine1 || !shippingCity || !shippingState || !shippingPostalCode) {
-    return res.status(400).json({ error: "Shipping address is required because winners are charged shipping and packaging." });
-  }
-  if (shippingCountry !== "US") return res.status(400).json({ error: "This checkout currently supports US shipping only." });
-
-  let existingBidder = db.getBidderByEmail(emailAddress);
-  let customerId = existingBidder?.stripeCustomerId || "";
-
-  if (!customerId) {
-    const customer = await stripe.customers.create({
-      name,
-      email: emailAddress,
-      phone: phone || undefined,
-      address: { line1: shippingLine1, line2: shippingLine2 || undefined, city: shippingCity, state: shippingState, postal_code: shippingPostalCode, country: shippingCountry },
-      shipping: { name, address: { line1: shippingLine1, line2: shippingLine2 || undefined, city: shippingCity, state: shippingState, postal_code: shippingPostalCode, country: shippingCountry } },
-      metadata: { source: "rayan_rao_art_auto_charge_auction" }
-    });
-    customerId = customer.id;
-  }
-
-  const session = await stripe.checkout.sessions.create({
-    mode: "setup",
-    customer: customerId,
-    payment_method_types: ["card"],
-    success_url: `${BASE_URL}/register-success.html?session_id={CHECKOUT_SESSION_ID}`,
-    cancel_url: `${BASE_URL}/register.html`,
-    metadata: { kind: "bidder_registration_auto_charge", email: emailAddress }
-  });
-
-  const bidder = db.createOrUpdateBidder({
-    name,
-    email: emailAddress,
-    phone,
-    location,
-    shippingName: name,
-    shippingLine1,
-    shippingLine2,
-    shippingCity,
-    shippingState,
-    shippingPostalCode,
-    shippingCountry,
-    stripeCustomerId: customerId,
-    stripeSetupSessionId: session.id,
-    termsAccepted: true,
-    autoChargeAuthorized: true
-  });
-
-  res.status(201).json({ checkoutUrl: session.url, bidder });
-});
-
-app.get("/api/bidders/status", (req, res) => {
-  const emailAddress = String(req.query.email || "").trim().toLowerCase();
-  if (!validator.isEmail(emailAddress)) return res.status(400).json({ error: "Please provide a valid email address." });
-  const bidder = db.getBidderByEmail(emailAddress);
-  if (!bidder) return res.status(404).json({ error: "No bidder registration found for this email." });
-  res.json({ bidder });
-});
-
-app.post("/api/originals/:id/bids", (req, res) => {
-  const art = db.getOriginalById(req.params.id);
-  if (!art) return res.status(404).json({ error: "Original artwork not found." });
-  if (art.status !== "active") return res.status(400).json({ error: "This auction is not currently active." });
-
-  const now = new Date();
-  const auctionEnd = new Date(art.endsAt);
-  if (Number.isNaN(auctionEnd.getTime())) return res.status(500).json({ error: "Auction end date is invalid." });
-  if (now >= auctionEnd) return res.status(400).json({ error: "This auction has already ended." });
-
-  const bidderEmail = String(req.body.bidderEmail || "").trim().toLowerCase();
-  const amount = Number(req.body.amount);
-
-  if (!validator.isEmail(bidderEmail)) return res.status(400).json({ error: "A valid registered email is required to place a bid." });
-
-  const bidder = db.getBidderByEmail(bidderEmail);
-  if (!bidder) return res.status(403).json({ error: "You must register to bid before placing a bid." });
-  if (bidder.blocked) return res.status(403).json({ error: "This bidder account is blocked from bidding." });
-  if (!bidder.termsAccepted || !bidder.autoChargeAuthorized) return res.status(403).json({ error: "You must accept the auction terms and authorize automatic winner charging before bidding." });
-  if (!bidder.paymentMethodSaved || !bidder.stripePaymentMethodId || !bidder.approvedToBid) {
-    return res.status(403).json({ error: "Your bidder registration is not complete yet. Please finish Stripe payment-method verification first." });
-  }
-  if (!Number.isFinite(amount)) return res.status(400).json({ error: "Please enter a valid bid amount." });
-
-  const currentBid = db.getCurrentBid(art.id);
-  const minimumNextBid = currentBid + art.bidIncrement;
-  if (amount < minimumNextBid) {
-    return res.status(400).json({ error: `Bid must be at least $${minimumNextBid}.`, currentBid, minimumNextBid });
-  }
-
-  const bid = db.createBid({ originalId: art.id, bidderId: bidder.id, bidderName: bidder.name, bidderEmail: bidder.email, amount });
-  res.status(201).json({ message: "Bid placed successfully. If you are the highest bidder when the auction ends, your saved payment method will be charged automatically for the bid plus estimated shipping/packaging.", bid, currentBid: amount, minimumNextBid: amount + art.bidIncrement, shippingEstimate: art.shippingEstimate });
-});
-
-app.get("/api/originals/:id/bids", (req, res) => {
-  const art = db.getOriginalById(req.params.id);
-  if (!art) return res.status(404).json({ error: "Original artwork not found." });
-  const bids = db.getBidsForOriginal(art.id).map((bid) => ({ id: bid.id, amount: bid.amount, createdAt: bid.created_at }));
-  res.json({ bids });
 });
 
 app.get("/api/prints", (req, res) => {
@@ -903,57 +436,6 @@ app.post("/api/prints/:id/checkout", checkoutRateLimit, async (req, res) => {
   }
 });
 
-app.get("/api/admin/originals", requireAdmin, (req, res) => {
-  const originals = db.getAllOriginalsForAdmin().map((art) => ({ ...art, currentBid: db.getCurrentBid(art.id), winningBid: db.getWinningBid(art.id), secondHighestBid: db.getSecondHighestBid(art.id), payment: db.getLatestPaymentForOriginal(art.id) }));
-  res.json({ originals, chargeAttempts: db.getAutoChargeAttempts() });
-});
-
-
-app.post("/api/admin/originals", requireAdmin, (req, res) => {
-  try {
-    const payload = validateOriginalPayload(req.body, { allowMissingId: true });
-    if (db.getOriginalById(payload.id)) {
-      return res.status(400).json({ error: "An artwork with this ID already exists. Change the ID or title." });
-    }
-    const original = db.createOriginalArtwork(payload);
-    res.status(201).json({ message: "Original artwork created.", original });
-  } catch (error) {
-    res.status(400).json({ error: publicErrorMessage(error, "Could not create artwork.") });
-  }
-});
-
-app.put("/api/admin/originals/:id", requireAdmin, (req, res) => {
-  try {
-    const existing = db.getOriginalById(req.params.id);
-    if (!existing) return res.status(404).json({ error: "Original artwork not found." });
-    const payload = validateOriginalPayload({ ...req.body, id: req.params.id });
-    const original = db.updateOriginalArtwork(req.params.id, payload);
-    res.json({ message: "Original artwork updated.", original });
-  } catch (error) {
-    res.status(400).json({ error: publicErrorMessage(error, "Could not update artwork.") });
-  }
-});
-
-app.delete("/api/admin/originals/:id", requireAdmin, (req, res) => {
-  const existing = db.getOriginalById(req.params.id);
-  if (!existing) return res.status(404).json({ error: "Original artwork not found." });
-  const hasBids = db.getBidsForOriginal(req.params.id).length > 0;
-  if (hasBids && existing.status !== "draft") {
-    return res.status(400).json({ error: "This artwork has bids. Cancel or archive it after reviewing the auction instead of deleting it." });
-  }
-  db.archiveOriginalArtwork(req.params.id);
-  res.json({ message: "Artwork archived." });
-});
-
-app.post("/api/admin/shipping/estimate", requireAdmin, (req, res) => {
-  try {
-    const payload = validateOriginalPayload(req.body, { allowMissingId: true });
-    res.json({ shippingEstimate: estimateOriginalShipping(payload) });
-  } catch (error) {
-    res.status(400).json({ error: publicErrorMessage(error, "Could not estimate shipping.") });
-  }
-});
-
 app.put("/api/admin/prints/:id/artwork-group", requireAdmin, (req, res) => {
   const print = db.getPrintById(req.params.id);
   if (!print) return res.status(404).json({ error: "Print product not found." });
@@ -962,142 +444,6 @@ app.put("/api/admin/prints/:id/artwork-group", requireAdmin, (req, res) => {
   const updated = db.setPrintArtworkKey(print.id, artworkKey);
   res.json({ message: "Artwork group updated.", print: updated });
 });
-
-app.post("/api/admin/auctions/process-ended", requireAdmin, async (req, res) => {
-  try {
-    const result = await processEndedAuctions();
-    res.json(result);
-  } catch (error) {
-    res.status(500).json({ error: publicErrorMessage(error, "Could not process ended auctions.") });
-  }
-});
-
-app.post("/api/admin/originals/:id/auto-charge-winner", requireAdmin, async (req, res) => {
-  try {
-    const result = await processEndedAuctions({ forceOriginalId: req.params.id, force: true });
-    res.json(result);
-  } catch (error) {
-    res.status(500).json({ error: publicErrorMessage(error, "Could not auto-charge winner.") });
-  }
-});
-
-app.post("/api/admin/originals/:id/end-bidding-now", requireAdmin, async (req, res) => {
-  try {
-    const art = db.getOriginalById(req.params.id);
-    if (!art) return res.status(404).json({ error: "Original artwork not found." });
-
-    if (["sold", "auto_charge_processing"].includes(art.status)) {
-      return res.status(400).json({ error: `This auction cannot be ended because its status is ${art.status}.` });
-    }
-
-    const winningBid = db.getWinningBid(art.id);
-    if (!winningBid) {
-      db.markOriginalStatus(art.id, "ended_no_bids");
-      return res.json({ ended: true, charged: false, status: "ended_no_bids", message: "Bidding ended. No bids were found, so no one was charged." });
-    }
-
-    const result = await processSingleAuctionAutoCharge(art, { force: true, selectedBid: winningBid });
-    res.json({ ended: true, message: "Bidding ended and the winning bidder was processed.", result });
-  } catch (error) {
-    res.status(500).json({ error: publicErrorMessage(error, "Could not end bidding now.") });
-  }
-});
-
-app.post("/api/admin/originals/:id/cancel-auction", requireAdmin, (req, res) => {
-  const art = db.getOriginalById(req.params.id);
-  if (!art) return res.status(404).json({ error: "Original artwork not found." });
-
-  if (["sold", "auto_charge_processing"].includes(art.status)) {
-    return res.status(400).json({ error: `This auction cannot be cancelled because its status is ${art.status}.` });
-  }
-
-  db.markOriginalStatus(art.id, "cancelled");
-  res.json({ cancelled: true, status: "cancelled", message: "Auction cancelled. New bids are now blocked and no one was charged." });
-});
-
-app.post("/api/admin/originals/:id/reopen-auction", requireAdmin, (req, res) => {
-  const art = db.getOriginalById(req.params.id);
-  if (!art) return res.status(404).json({ error: "Original artwork not found." });
-
-  if (["sold", "auto_charge_processing"].includes(art.status)) {
-    return res.status(400).json({ error: `This auction cannot be reopened because its status is ${art.status}.` });
-  }
-
-  let endsAt = req.body?.endsAt ? String(req.body.endsAt) : "";
-  const currentEnd = new Date(art.endsAt);
-
-  if (!endsAt) {
-    if (Number.isNaN(currentEnd.getTime()) || currentEnd <= new Date()) {
-      endsAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
-    } else {
-      endsAt = art.endsAt;
-    }
-  }
-
-  const parsedEnd = new Date(endsAt);
-  if (Number.isNaN(parsedEnd.getTime())) {
-    return res.status(400).json({ error: "Invalid auction end date." });
-  }
-
-  db.updateOriginalEndsAt(art.id, endsAt);
-  db.markOriginalStatus(art.id, "active");
-  res.json({ reopened: true, status: "active", endsAt, message: "Auction reopened. Bidding is active again." });
-});
-
-app.post("/api/admin/originals/:id/charge-second-highest", requireAdmin, async (req, res) => {
-  try {
-    const art = db.getOriginalById(req.params.id);
-    if (!art) return res.status(404).json({ error: "Original artwork not found." });
-
-    if (art.status === "sold") {
-      return res.status(400).json({ error: "This original is already sold." });
-    }
-
-    const secondHighestBid = db.getSecondHighestBid(art.id);
-    if (!secondHighestBid) {
-      return res.status(400).json({ error: "There is no second-highest bidder for this auction." });
-    }
-
-    const result = await processSingleAuctionAutoCharge(art, { force: true, selectedBid: secondHighestBid });
-    res.json({ message: "Second-highest bidder was processed.", result });
-  } catch (error) {
-    res.status(500).json({ error: publicErrorMessage(error, "Could not process second-highest bidder.") });
-  }
-});
-
-// Manual checkout fallback remains available but automatic charging is the default auction path.
-app.post("/api/admin/originals/:id/create-winner-checkout", requireAdmin, async (req, res) => {
-  if (!requireStripe(res)) return;
-  const art = db.getOriginalById(req.params.id);
-  if (!art) return res.status(404).json({ error: "Original artwork not found." });
-  const winningBid = db.getWinningBid(art.id);
-  if (!winningBid) return res.status(400).json({ error: "There are no bids for this original yet." });
-  const existingPaid = db.getPaidPaymentForOriginal(art.id);
-  if (existingPaid) return res.status(400).json({ error: "This original has already been paid for." });
-
-  const shippingEstimate = estimateOriginalShipping(art);
-  const totalAmount = Math.round(winningBid.amount + shippingEstimate.total);
-
-  const session = await stripe.checkout.sessions.create({
-    mode: "payment",
-    customer_email: winningBid.bidder_email,
-    payment_intent_data: { receipt_email: winningBid.bidder_email },
-    line_items: [{ price_data: { currency: "usd", unit_amount: Math.round(totalAmount * 100), product_data: { name: `Original painting: ${art.title}`, description: `${art.medium} · ${art.size} · Winning bid $${winningBid.amount} + shipping $${shippingEstimate.total}` } }, quantity: 1 }],
-    metadata: { kind: "original", originalId: art.id, bidId: String(winningBid.id) },
-    success_url: `${BASE_URL}/success.html?session_id={CHECKOUT_SESSION_ID}`,
-    cancel_url: `${BASE_URL}/originals.html`
-  });
-
-  const bidder = winningBid.bidder_id ? db.getBidderById(winningBid.bidder_id) : db.getBidderByEmail(winningBid.bidder_email);
-  const payment = db.createPayment({ kind: "original", originalId: art.id, bidId: winningBid.id, bidderId: bidder?.id || null, stripeSessionId: session.id, checkoutUrl: session.url, customerName: winningBid.bidder_name, customerEmail: winningBid.bidder_email, subtotalAmount: winningBid.amount, shippingAmount: shippingEstimate.total, totalAmount, amount: totalAmount, shippingJson: shippingEstimate, status: "pending" });
-  db.markOriginalPaymentPending(art.id);
-  res.status(201).json({ message: "Winner checkout link created.", checkoutUrl: session.url, payment });
-});
-
-app.get("/api/admin/bidders", requireAdmin, (req, res) => res.json({ bidders: db.getAllBidders() }));
-app.post("/api/admin/bidders/:id/approve", requireAdmin, (req, res) => res.json({ bidder: db.setBidderApproval(req.params.id, true) }));
-app.post("/api/admin/bidders/:id/block", requireAdmin, (req, res) => res.json({ bidder: db.setBidderBlocked(req.params.id, true) }));
-app.post("/api/admin/bidders/:id/unblock", requireAdmin, (req, res) => res.json({ bidder: db.setBidderBlocked(req.params.id, false) }));
 
 app.get("/api/admin/prints", requireAdmin, (req, res) => res.json({ prints: db.getAllPrintsForAdmin() }));
 app.post("/api/admin/printful/sync-products", requireAdmin, async (req, res) => {
@@ -1174,19 +520,16 @@ function startServer() {
   await configurePrintfulWebhookOnStartup();
   if (!email.isEmailEnabled()) logger.warn("[tracking] Verify a Resend domain and set RESEND_API_KEY and FROM_EMAIL before customer shipment emails can send.");
   await orders.tick().catch((error) => logger.error("[orders] retry worker:", error.message));
-  await auctions.tick().catch((error) => logger.error("[auctions] worker:", error.message));
   });
   const retryTimer = setInterval(() => orders.tick().catch((error) => logger.error("[orders] retry worker:", error.message)), 60000);
   retryTimer.unref();
-  const auctionTimer = setInterval(() => auctions.tick().catch((error) => logger.error("[auctions] worker:", error.message)), 15000);
-  auctionTimer.unref();
   const syncInterval = Number(process.env.PRINTFUL_SYNC_INTERVAL_MS ?? 900000);
   const syncTimer = Number.isFinite(syncInterval) && syncInterval >= 60000
     ? setInterval(() => syncPrintfulOnStartup(true), syncInterval) : null;
   syncTimer?.unref();
-  server.on("close", () => { clearInterval(retryTimer); clearInterval(auctionTimer); if (syncTimer) clearInterval(syncTimer); });
+  server.on("close", () => { clearInterval(retryTimer); if (syncTimer) clearInterval(syncTimer); });
   return server;
 }
 
 if (require.main === module) startServer();
-module.exports = { app, startServer, orders, auctions };
+module.exports = { app, startServer, orders };

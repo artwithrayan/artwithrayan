@@ -84,15 +84,6 @@ function attachShippingDestination(form) {
   });
 }
 
-function timeRemaining(endsAt) {
-  const diff = new Date(endsAt) - new Date();
-  if (diff <= 0) return "Auction ended";
-  const days = Math.floor(diff / (1000 * 60 * 60 * 24));
-  const hours = Math.floor((diff / (1000 * 60 * 60)) % 24);
-  const minutes = Math.floor((diff / (1000 * 60)) % 60);
-  return `${days}d ${hours}h ${minutes}m left`;
-}
-
 function artworkImage(item, className = "", imageAttributes = "") {
   if (item.imageUrl) return `<div class="art-image ${className}" style="--c1:${item.colorOne}; --c2:${item.colorTwo}">${responsiveImage(item.imageUrl, item.title, `loading="lazy" decoding="async" ${imageAttributes}`)}</div>`;
   return `<div class="art-image ${className}" style="--c1:${item.colorOne}; --c2:${item.colorTwo}"></div>`;
@@ -152,7 +143,8 @@ async function renderOriginals() {
     if (!originals.length) { grid.innerHTML = "<p>No original paintings are currently available.</p>"; return; }
 
     grid.innerHTML = originals.map((art) => {
-      const isAvailable = !art.auction && ["active", "payment_pending"].includes(art.status);
+      const isAvailable = ["active", "payment_pending"].includes(art.status);
+      const ebayAuctionUrl = art.id === "sun-beam" ? "https://ebay.io/m/WRlkwy" : "";
       const inquirySubject = `Purchase inquiry: ${art.title}`;
       const inquiryBody = `Hi Rayan,\n\nI'm interested in purchasing "${art.title}" (${art.size}, ${art.medium}).\n\nCould you confirm availability, pricing, and shipping?\n\nThank you,\n`;
       const inquiryUrl = `mailto:${inquiryEmail}?subject=${encodeURIComponent(inquirySubject)}&body=${encodeURIComponent(inquiryBody)}`;
@@ -168,9 +160,9 @@ async function renderOriginals() {
           </div>
           ${art.revealImageUrl ? `<button type="button" class="shine-button" data-id="${escapeHtml(art.id)}" aria-pressed="false">Shine a light</button>` : ""}
           ${art.id === "sun-beam" ? '<button type="button" class="rotation-button" aria-label="Pause Sun Beam rotation" aria-pressed="true">Pause rotation</button>' : ""}
-          ${art.auction ? `<div class="auction-summary"><span>${art.auction.status === "open" ? `${art.auction.bidCount ? "Current bid" : "Starting bid"}: ${money(art.auction.currentCents / 100)}` : escapeHtml(art.auction.status.replaceAll("_", " "))}</span><a class="button" href="auction.html?id=${encodeURIComponent(art.auction.id)}">View auction</a></div>` : ""}
-          ${isAvailable && art.canEstimateShipping ? `<details class="original-shipping"><summary>Shipping estimate</summary><form class="original-shipping-form" data-id="${escapeHtml(art.id)}"><label>Destination<select name="country" required><option value="US">United States</option><option value="OTHER">Other destinations</option></select></label><label data-estimate-state>State<select name="state" required>${US_STATE_OPTIONS}<option value="DC">District of Columbia</option></select></label><button type="submit">Estimate shipping</button><p class="notice" role="status" aria-live="polite" data-shipping-estimate-result>Shipping and protective packing estimate. Final cost confirmed by email.</p></form></details>` : ""}
-          ${isAvailable ? `<a class="button original-inquiry" href="${escapeHtml(inquiryUrl)}" aria-label="${escapeHtml(`Email if interested in purchasing ${art.title}`)}">Email if interested in purchasing</a><a class="original-contact-email" href="${escapeHtml(inquiryUrl)}">${escapeHtml(inquiryEmail)}</a>` : ""}
+          ${isAvailable && !ebayAuctionUrl && art.canEstimateShipping ? `<details class="original-shipping"><summary>Shipping estimate</summary><form class="original-shipping-form" data-id="${escapeHtml(art.id)}"><label>Destination<select name="country" required><option value="US">United States</option><option value="OTHER">Other destinations</option></select></label><label data-estimate-state>State<select name="state" required>${US_STATE_OPTIONS}<option value="DC">District of Columbia</option></select></label><button type="submit">Estimate shipping</button><p class="notice" role="status" aria-live="polite" data-shipping-estimate-result>Shipping and protective packing estimate. Final cost confirmed by email.</p></form></details>` : ""}
+          ${isAvailable && ebayAuctionUrl ? `<a class="button original-ebay-auction" href="${escapeHtml(ebayAuctionUrl)}" target="_blank" rel="noopener noreferrer" aria-label="${escapeHtml(`Bid on ${art.title} on eBay (opens in a new tab)`)}">Bid on eBay</a>` : ""}
+          ${isAvailable && !ebayAuctionUrl ? `<a class="button original-inquiry" href="${escapeHtml(inquiryUrl)}" aria-label="${escapeHtml(`Email if interested in purchasing ${art.title}`)}">Email if interested in purchasing</a><a class="original-contact-email" href="${escapeHtml(inquiryUrl)}">${escapeHtml(inquiryEmail)}</a>` : ""}
         </article>`;
     }).join("");
     attachRevealHandlers();
@@ -464,10 +456,6 @@ function attachCheckoutHandler(form, kind, notice) {
   });
 }
 
-function updateCountdowns() {
-  document.querySelectorAll(".countdown[data-ends]").forEach((el) => { if (el.textContent.toLowerCase() !== "sold") el.textContent = timeRemaining(el.dataset.ends); });
-}
-
 async function loadSiteContent() {
   if (!document.querySelector("[data-edit-key]")) return;
   try {
@@ -486,7 +474,6 @@ if (year) year.textContent = new Date().getFullYear();
 loadSiteContent();
 renderOriginals();
 renderPrints();
-setInterval(updateCountdowns, 60000);
 
 // Reduce casual image saving without blocking normal text selection or checkout fields.
 document.addEventListener("contextmenu", (event) => {

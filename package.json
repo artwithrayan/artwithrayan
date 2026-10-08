@@ -10,10 +10,7 @@
     "security:secrets": "node scripts/check-secrets.cjs",
     "security:history": "node scripts/check-secrets.cjs --history",
     "sync:printful": "node scripts/sync-printful.js",
-    "export:orders": "node scripts/export-orders.js",
-    "auctions": "node scripts/auctions.cjs",
-    "preview:auctions": "node tests/preview-auctions.cjs",
-    "test:auctions:stripe": "node tests/stripe-auction-sandbox.cjs"
+    "export:orders": "node scripts/export-orders.js"
   },
   "dependencies": {
     "better-sqlite3": "latest",

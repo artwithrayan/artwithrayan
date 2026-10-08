@@ -17,7 +17,6 @@ Object.assign(process.env, {
 
 const sessions = new Map();
 const calls = { drafts: 0, sheets: 0, emails: 0, refunds: 0, checkouts: 0 };
-const setupIntents = new Map();
 const failures = { drafts: false, sheets: false, emails: false };
 const sdk = new RealStripe("sk_test_local_fixture");
 class StripeMock {
@@ -31,10 +30,6 @@ class StripeMock {
           amount_total: (config.line_items || []).reduce((sum, line) => sum + line.price_data.unit_amount * line.quantity, 0),
           payment_intent: { id: `pi_${id}`, latest_charge: { refunded: false, amount_refunded: 0 } } };
         sessions.set(id, session);
-        if (config.mode === "setup") {
-          session.setup_intent = `seti_${id}`;
-          setupIntents.set(session.setup_intent, { customer: config.customer, status: "succeeded", usage: "off_session", payment_method: `pm_${id}`, metadata: config.setup_intent_data.metadata });
-        }
         return session;
       },
       retrieve: async (id) => {
@@ -43,8 +38,6 @@ class StripeMock {
       }
     } };
     this.refunds = { create: async () => { calls.refunds++; return { id: "re_test" }; } };
-    this.customers = { create: async ({ email }) => ({ id: `cus_${email}` }) };
-    this.setupIntents = { retrieve: async (id) => setupIntents.get(id) };
   }
 }
 const load = Module._load;

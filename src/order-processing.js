@@ -84,6 +84,7 @@ function createOrderProcessor({ db, stripe, printful, sheets, email }) {
         for (const payment of db.getPendingCheckoutPayments()) {
           try {
             const session = await stripe.checkout.sessions.retrieve(payment.stripe_session_id);
+            if (String(session.metadata?.flow || "").startsWith("art_auction_") || String(session.metadata?.kind || "").includes("auction") || session.metadata?.bidId) continue;
             if (session.payment_status === "paid") db.confirmCheckoutPayment(session);
             else if (session.status === "expired") db.cancelCheckoutReservation(session.id);
           } catch (error) { logger.error(`[checkout cleanup] order ${payment.id}: ${error.message}`); }
