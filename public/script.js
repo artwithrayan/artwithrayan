@@ -144,7 +144,10 @@ async function renderOriginals() {
 
     grid.innerHTML = originals.map((art) => {
       const isAvailable = ["active", "payment_pending"].includes(art.status);
-      const ebayAuctionUrl = art.id === "sun-beam" ? "https://ebay.io/m/WRlkwy" : "";
+      const ebayAuctionUrl = {
+        "sun-beam": "https://ebay.io/m/WRlkwy",
+        "the-light": "https://ebay.io/m/JAhrjQ"
+      }[art.id] || "";
       const inquirySubject = `Purchase inquiry: ${art.title}`;
       const inquiryBody = `Hi Rayan,\n\nI'm interested in purchasing "${art.title}" (${art.size}, ${art.medium}).\n\nCould you confirm availability, pricing, and shipping?\n\nThank you,\n`;
       const inquiryUrl = `mailto:${inquiryEmail}?subject=${encodeURIComponent(inquirySubject)}&body=${encodeURIComponent(inquiryBody)}`;

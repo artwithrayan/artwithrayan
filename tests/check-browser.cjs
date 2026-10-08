@@ -66,10 +66,10 @@ async function main() {
           continue;
         }
         assert.equal(await card.locator(".original-status").count(), 0);
-        if (art.id === "sun-beam") {
-          const ebay = card.getByRole("link", { name: "Bid on Sun Beam on eBay (opens in a new tab)", exact: true });
+        if (["sun-beam", "the-light"].includes(art.id)) {
+          const ebay = card.getByRole("link", { name: `Bid on ${art.title} on eBay (opens in a new tab)`, exact: true });
           assert.equal(await ebay.textContent(), "Bid on eBay");
-          assert.equal(await ebay.getAttribute("href"), "https://ebay.io/m/WRlkwy");
+          assert.equal(await ebay.getAttribute("href"), art.id === "sun-beam" ? "https://ebay.io/m/WRlkwy" : "https://ebay.io/m/JAhrjQ");
           assert.equal(await ebay.getAttribute("target"), "_blank");
           assert.equal(await ebay.getAttribute("rel"), "noopener noreferrer");
           assert.equal(await inquiry.count(), 0);
@@ -89,24 +89,7 @@ async function main() {
         assert.equal(await card.locator(".original-contact-email").innerText(), "artwithrayan@gmail.com");
       }
 
-      const lightShipping = page.locator('[data-original-id="the-light"] .original-shipping');
-      assert.equal(await page.locator(".original-shipping").count(), 1);
-      await lightShipping.locator("summary").click();
-      await lightShipping.locator('[name="state"]').selectOption("NC");
-      await lightShipping.locator("button").click();
-      await page.waitForFunction(() => document.querySelector('[data-original-id="the-light"] [data-shipping-estimate-result]').textContent.startsWith("$45"));
-      await lightShipping.locator('[name="state"]').selectOption("CA");
-      assert.doesNotMatch(await lightShipping.locator('[role="status"]').innerText(), /\$45/);
-      await lightShipping.locator("button").click();
-      await page.waitForFunction(() => document.querySelector('[data-original-id="the-light"] [data-shipping-estimate-result]').textContent.startsWith("$65"));
-      await lightShipping.locator('[name="country"]').selectOption("OTHER");
-      assert.equal(await lightShipping.locator('[name="state"]').isVisible(), false);
-      assert.doesNotMatch(await lightShipping.locator('[role="status"]').innerText(), /\$/);
-      await lightShipping.locator("button").click();
-      await page.waitForFunction(() => document.querySelector('[data-original-id="the-light"] [data-shipping-estimate-result]').textContent.includes("international destinations"));
-      await page.screenshot({ path: path.join(output, `original-shipping-${width}.png`), fullPage: true });
-      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth + 1), false);
-      await lightShipping.locator("summary").click();
+      assert.equal(await page.locator(".original-shipping").count(), 0);
 
       const sunBeam = page.locator('[data-original-id="sun-beam"]');
       const rotatingImage = sunBeam.locator(".rotating-art-image img");
