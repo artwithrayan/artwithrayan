@@ -1,11 +1,24 @@
 node_modules/
 .env
+.env.*
+!.env.example
+!.env.sample
+!.env.template
+*.pem
+*.key
+*.p12
+*.pfx
+credentials*.json
+*service-account*.json
+*service_account*.json
+secrets/
 *.log
 
 # SQLite local database/runtime files
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
+*.db
 
 # OS/editor files
 .DS_Store

@@ -1,4 +1,5 @@
-require("dotenv").config();
+require("dotenv").config({ quiet: true });
+const { redactSecrets, publicErrorMessage, logger } = require("./src/security");
 
 const path = require("path");
 const crypto = require("crypto");
@@ -13,7 +14,7 @@ const db = require("./src/db");
 const email = require("./src/email");
 const printful = require("./src/printful");
 const sheets = require("./src/google-sheets");
-const { estimateOriginalShipping, estimateSelfFulfillmentShipping } = require("./src/shipping");
+const { estimateOriginalShipping, estimateSelfFulfillmentShipping, hasOriginalShippingProfile, estimateOriginalDestinationShipping } = require("./src/shipping");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -21,6 +22,9 @@ const BASE_URL = process.env.BASE_URL || `http://localhost:${PORT}`;
 const stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SECRET_KEY, { timeout: 20000, maxNetworkRetries: 1 }) : null;
 const { createOrderProcessor } = require("./src/order-processing");
 const orders = createOrderProcessor({ db, stripe, printful, sheets, email });
+const { createAuctionService } = require("./src/auctions");
+const auctions = createAuctionService({ db, stripe, email, orders, baseUrl: BASE_URL.replace(/\/$/, "") });
+auctions.configure(require("./config/auctions.json"));
 const AUTO_CHARGE_AUCTIONS = false;
 const STRIPE_CARD_PERCENT = 0.029;
 const STRIPE_CARD_FIXED_CENTS = 30;
@@ -137,13 +141,37 @@ function validateOriginalPayload(body, { allowMissingId = false } = {}) {
 }
 
 
-app.use(helmet({ contentSecurityPolicy: false }));
+const footerScriptHash = crypto.createHash("sha256").update('document.getElementById("year").textContent = new Date().getFullYear();').digest("base64");
+app.use(helmet({ contentSecurityPolicy: { directives: {
+  defaultSrc: ["'self'"],
+  scriptSrc: ["'self'", `'sha256-${footerScriptHash}'`],
+  scriptSrcAttr: ["'none'"],
+  styleSrc: ["'self'", "'unsafe-inline'"],
+  imgSrc: ["'self'", "https:", "data:"],
+  connectSrc: ["'self'"],
+  objectSrc: ["'none'"],
+  baseUri: ["'none'"],
+  frameAncestors: ["'none'"],
+  formAction: ["'self'", "https://checkout.stripe.com"],
+  upgradeInsecureRequests: process.env.NODE_ENV === "production" ? [] : null
+} } }));
 app.use(morgan((tokens, req, res) => [
   tokens.method(req, res),
-  req.path,
+  redactSecrets(req.path),
   tokens.status(req, res),
   tokens["response-time"](req, res), "ms"
 ].join(" ")));
+
+app.use((req, res, next) => {
+  let pathname;
+  try { pathname = decodeURIComponent(req.path); }
+  catch { return res.status(400).json({ error: "Invalid request path." }); }
+  if (/(?:^|\/)\.[^/]+|(?:^|\/)(?:node_modules|src|scripts|tests|secrets)(?:\/|$)|\.(?:pem|key|p12|pfx|sqlite(?:-shm|-wal)?|db|log|bak|map)$/i.test(pathname)
+    || /(?:^|\/)(?:credentials[^/]*|[^/]*service[-_]account[^/]*)\.json$/i.test(pathname)) {
+    return res.status(404).json({ error: "Not found." });
+  }
+  next();
+});
 
 function requireStripe(res) {
   if (!stripe) {
@@ -357,11 +385,12 @@ app.post("/api/stripe/webhook", express.raw({ type: "application/json" }), async
     const signature = req.headers["stripe-signature"];
     event = stripe.webhooks.constructEvent(req.body, signature, process.env.STRIPE_WEBHOOK_SECRET);
   } catch (error) {
-    return res.status(400).send(`Webhook error: ${error.message}`);
+    return res.status(400).send("Invalid webhook signature.");
   }
 
   try {
-    console.log(`[stripe webhook] received ${event.type}${event.data?.object?.id ? ` (${event.data.object.id})` : ""}`);
+    logger.log(`[stripe webhook] received ${event.type}${event.data?.object?.id ? ` (${event.data.object.id})` : ""}`);
+    if (await auctions.webhook(event)) return res.json({ received: true });
     if (event.type === "checkout.session.expired" || event.type === "checkout.session.async_payment_failed") {
       const expiredSession = event.data.object;
       let expiredPayment = db.getPaymentByStripeSessionId(expiredSession.id);
@@ -420,7 +449,7 @@ app.post("/api/stripe/webhook", express.raw({ type: "application/json" }), async
           if (payment) db.setPaymentCheckoutSession(payment.id, session.id, payment.checkout_url);
         }
         if (!payment) {
-          console.error(`[stripe webhook] no local payment record for completed session ${session.id}`);
+          logger.error(`[stripe webhook] no local payment record for completed session ${session.id}`);
           return res.status(500).json({ error: "Payment record not found." });
         }
         payment = db.confirmCheckoutPayment(session);
@@ -431,7 +460,7 @@ app.post("/api/stripe/webhook", express.raw({ type: "application/json" }), async
 
     res.json({ received: true });
   } catch (error) {
-    console.error("Webhook handling error:", error);
+    logger.error("Webhook handling error:", error);
     res.status(500).json({ error: "Webhook handler failed." });
   }
 });
@@ -450,7 +479,7 @@ app.post("/api/printful/webhook", express.json(), async (req, res) => {
 
   const payment = db.getPaymentByPrintfulOrderId(printfulOrderId);
   if (!payment) {
-    console.warn(`[printful webhook] no payment found for order ${printfulOrderId}`);
+    logger.warn(`[printful webhook] no payment found for order ${printfulOrderId}`);
     return res.json({ received: true, handled: false });
   }
 
@@ -466,15 +495,65 @@ app.post("/api/printful/webhook", express.json(), async (req, res) => {
   const result = await orders.processPayment(payment.id);
   if (result.errors.length) return res.status(503).json({ error: "Shipment recorded; integration retry scheduled." });
 
-  console.log(`[printful webhook] tracking recorded for order ${printfulOrderId}`);
+  logger.log(`[printful webhook] tracking recorded for order ${printfulOrderId}`);
   return res.json({ received: true, handled: true });
 });
 
 app.use(express.json());
+const auctionWriteLimit = rateLimit({ windowMs: 15 * 60 * 1000, limit: 40, standardHeaders: "draft-8", legacyHeaders: false });
+const auctionLoginLimit = rateLimit({ windowMs: 15 * 60 * 1000, limit: 10, standardHeaders: "draft-8", legacyHeaders: false });
+app.use("/api/auctions", (req, res, next) => {
+  res.setHeader("Cache-Control", "no-store");
+  if (req.method !== "GET" && req.get("origin") !== new URL(BASE_URL).origin) return res.status(403).json({ error: "Please submit from this website." });
+  const session = String(req.headers.cookie || "").split(";").map((part) => part.trim()).find((part) => part.startsWith("auction_session="))?.slice(16);
+  req.auctionUser = auctions.authenticate(session);
+  req.auctionSession = session;
+  next();
+});
+const auctionHandler = (fn) => async (req, res) => {
+  try { await fn(req, res); }
+  catch (error) {
+    logger.error(`[auction request] ${error.message}`);
+    res.status(error.statusCode || 503).json({ error: error.statusCode && error.statusCode < 500 ? publicErrorMessage(error) : "Auction service temporarily unavailable. Please try again." });
+  }
+};
+const auctionUser = (req) => {
+  if (!req.auctionUser) throw Object.assign(new Error("Verify your email to continue."), { statusCode: 401 });
+  return req.auctionUser;
+};
+app.get("/api/auctions", (req, res) => res.json({ auctions: auctions.list() }));
+app.post("/api/auctions/login", auctionLoginLimit, auctionHandler(async (req, res) => res.json(await auctions.requestCode(req.body.email))));
+app.post("/api/auctions/logout", auctionWriteLimit, (req, res) => {
+  auctions.logout(req.auctionSession);
+  res.clearCookie("auction_session", { path: "/api/auctions" });
+  res.json({ signedOut: true });
+});
+app.post("/api/auctions/verify", auctionWriteLimit, auctionHandler(async (req, res) => {
+  const session = auctions.verifyCode(req.body.challenge, req.body.code);
+  res.cookie("auction_session", session, { httpOnly: true, secure: BASE_URL.startsWith("https:"), sameSite: "strict", path: "/api/auctions", maxAge: 7 * 86400000 });
+  res.json({ verified: true });
+}));
+app.get("/api/auctions/:id", auctionHandler(async (req, res) => {
+  const auction = auctions.get(req.params.id);
+  if (!auction) return res.status(404).json({ error: "Auction not found." });
+  const original = db.getOriginalById(auction.original_id);
+  res.json({ auction: auctions.publicAuction(auction, req.auctionUser), original: publicOriginalDetails(original), email: req.auctionUser?.email || null });
+}));
+app.post("/api/auctions/:id/refresh", auctionWriteLimit, auctionHandler(async (req, res) => {
+  await auctions.refreshSetup(auctionUser(req), req.params.id);
+  res.json({ refreshed: true });
+}));
+app.post("/api/auctions/:id/quote", auctionWriteLimit, auctionHandler(async (req, res) => res.json(auctions.quote(req.params.id, auctionUser(req), req.body))));
+app.post("/api/auctions/:id/authorize", auctionWriteLimit, auctionHandler(async (req, res) => {
+  const entry = db.sqlite.prepare("SELECT auction_id FROM auction_entries WHERE id=?").get(String(req.body.quoteId || ""));
+  if (entry?.auction_id !== req.params.id) return res.status(404).json({ error: "Bid review not found." });
+  res.json(await auctions.authorize(auctionUser(req), req.body.quoteId, req.body.agreed));
+}));
 app.use("/api/admin", (req, res) => res.status(404).json({ error: "Admin tools are disabled." }));
 app.use("/api/bidders", (req, res) => res.status(404).json({ error: "Bidding is no longer available." }));
 app.use("/api/originals/:id/bids", (req, res) => res.status(404).json({ error: "Bidding is no longer available." }));
 app.use(express.static(path.join(__dirname, "public"), {
+  dotfiles: "deny",
   setHeaders(res, filename) {
     if (/\.(?:webp|jpg|png)$/i.test(filename)) res.setHeader("Cache-Control", "public, max-age=86400");
     if (/-[a-f0-9]{12}(?:-\d+)?\.webp$/i.test(filename)) res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
@@ -492,7 +571,7 @@ app.get("/api/health", (req, res) => res.json({
 app.get("/api/site-content", (req, res) => res.json({ content: db.getSiteContent() }));
 
 function publicOriginalDetails({ price, startingBid, ...art }) {
-  return art;
+  return { ...art, auction: auctions.forOriginal(art.id), canEstimateShipping: hasOriginalShippingProfile(art.id) && ["active", "payment_pending"].includes(art.status) };
 }
 
 app.get("/api/originals", (req, res) => {
@@ -505,6 +584,17 @@ app.get("/api/originals/:id", (req, res) => {
   const art = db.getOriginalById(req.params.id);
   if (!art) return res.status(404).json({ error: "Original artwork not found." });
   res.json({ original: publicOriginalDetails(art), inquiryEmail: ORIGINAL_INQUIRY_EMAIL });
+});
+
+app.post("/api/originals/:id/shipping-estimate", quoteRateLimit, (req, res) => {
+  const art = db.getOriginalById(req.params.id);
+  if (!art) return res.status(404).json({ error: "Original artwork not found." });
+  if (!["active", "payment_pending"].includes(art.status)) return res.status(409).json({ error: "This original is not available for purchase." });
+  try {
+    res.json({ estimate: estimateOriginalDestinationShipping(art.id, req.body || {}) });
+  } catch (error) {
+    res.status(error.statusCode || 400).json({ error: publicErrorMessage(error, "Please email for a shipping quote.") });
+  }
 });
 
 app.post(["/api/originals/:id/shipping-rate", "/api/originals/:id/checkout"], (req, res) => {
@@ -547,7 +637,7 @@ app.post("/api/print-club/checkout", checkoutRateLimit, async (req, res) => {
 
     res.json({ checkoutUrl: session.url });
   } catch (error) {
-    console.error("[print club checkout]", error);
+    logger.error("[print club checkout]", error);
     res.status(502).json({ error: "Could not open Print Club checkout. Please try again." });
   }
 });
@@ -710,7 +800,7 @@ app.get("/api/shipping/countries", async (_req, res) => {
   try {
     const countries = (await printful.getShippingCountries()).map((country) => ({ ...country, postalCodeRequired: shippingPostalCodeRequired(country.code) }));
     res.set("Cache-Control", "public, max-age=3600").json({ countries });
-  } catch (error) { res.status(502).json({ error: error.message }); }
+  } catch (error) { res.status(502).json({ error: publicErrorMessage(error, "Could not load shipping destinations. Please try again.") }); }
 });
 
 async function getPrintShippingQuote(print, body) {
@@ -765,7 +855,7 @@ app.post("/api/prints/:id/shipping-rate", quoteRateLimit, async (req, res) => {
     const quote = await getPrintShippingQuote(print, req.body);
     const customerPrice = prettyStripeAdjustedPrice(print.price);
     res.json({ shipping: quote.shippingAmount, fulfillmentTax: quote.fulfillmentTax, product: customerPrice, total: customerPrice + quote.shippingAmount + quote.fulfillmentTax, currency: quote.rate.currency, method: quote.rate.id, name: quote.rate.name, delivery: { min: quote.rate.minDeliveryDays, max: quote.rate.maxDeliveryDays }, estimate: quote.selfEstimate || null });
-  } catch (error) { res.status(error.statusCode || 502).json({ error: error.message || "Could not calculate shipping." }); }
+  } catch (error) { res.status(error.statusCode || 502).json({ error: publicErrorMessage(error, "Could not calculate shipping. Please try again or contact us.") }); }
 });
 
 app.post("/api/prints/:id/checkout", checkoutRateLimit, async (req, res) => {
@@ -776,7 +866,7 @@ app.post("/api/prints/:id/checkout", checkoutRateLimit, async (req, res) => {
 
   let quote;
   try { quote = await getPrintShippingQuote(print, req.body); }
-  catch (error) { return res.status(error.statusCode || 502).json({ error: error.message || "Could not calculate shipping." }); }
+  catch (error) { return res.status(error.statusCode || 502).json({ error: publicErrorMessage(error, "Could not calculate shipping. Please try again or contact us.") }); }
   const { recipient, rate, shippingAmount, fulfillmentTax } = quote;
   const customerPrice = prettyStripeAdjustedPrice(print.price);
   const customerEmail = recipient.email;
@@ -807,7 +897,7 @@ app.post("/api/prints/:id/checkout", checkoutRateLimit, async (req, res) => {
     db.setPaymentCheckoutSession(payment.id, session.id, session.url, session.expires_at);
     res.json({ checkoutUrl: session.url });
   } catch (error) {
-    if (payment) db.markPaymentFailed(payment.stripe_session_id, error.message || "Could not create checkout.");
+    if (payment) db.markPaymentFailed(payment.stripe_session_id, redactSecrets(error.message || "Could not create checkout."));
     if (shouldReserveStock) db.releasePrintStockReservation(print.id);
     throw error;
   }
@@ -828,7 +918,7 @@ app.post("/api/admin/originals", requireAdmin, (req, res) => {
     const original = db.createOriginalArtwork(payload);
     res.status(201).json({ message: "Original artwork created.", original });
   } catch (error) {
-    res.status(400).json({ error: error.message || "Could not create artwork." });
+    res.status(400).json({ error: publicErrorMessage(error, "Could not create artwork.") });
   }
 });
 
@@ -840,7 +930,7 @@ app.put("/api/admin/originals/:id", requireAdmin, (req, res) => {
     const original = db.updateOriginalArtwork(req.params.id, payload);
     res.json({ message: "Original artwork updated.", original });
   } catch (error) {
-    res.status(400).json({ error: error.message || "Could not update artwork." });
+    res.status(400).json({ error: publicErrorMessage(error, "Could not update artwork.") });
   }
 });
 
@@ -860,7 +950,7 @@ app.post("/api/admin/shipping/estimate", requireAdmin, (req, res) => {
     const payload = validateOriginalPayload(req.body, { allowMissingId: true });
     res.json({ shippingEstimate: estimateOriginalShipping(payload) });
   } catch (error) {
-    res.status(400).json({ error: error.message || "Could not estimate shipping." });
+    res.status(400).json({ error: publicErrorMessage(error, "Could not estimate shipping.") });
   }
 });
 
@@ -878,7 +968,7 @@ app.post("/api/admin/auctions/process-ended", requireAdmin, async (req, res) => 
     const result = await processEndedAuctions();
     res.json(result);
   } catch (error) {
-    res.status(500).json({ error: error.message || "Could not process ended auctions." });
+    res.status(500).json({ error: publicErrorMessage(error, "Could not process ended auctions.") });
   }
 });
 
@@ -887,7 +977,7 @@ app.post("/api/admin/originals/:id/auto-charge-winner", requireAdmin, async (req
     const result = await processEndedAuctions({ forceOriginalId: req.params.id, force: true });
     res.json(result);
   } catch (error) {
-    res.status(500).json({ error: error.message || "Could not auto-charge winner." });
+    res.status(500).json({ error: publicErrorMessage(error, "Could not auto-charge winner.") });
   }
 });
 
@@ -909,7 +999,7 @@ app.post("/api/admin/originals/:id/end-bidding-now", requireAdmin, async (req, r
     const result = await processSingleAuctionAutoCharge(art, { force: true, selectedBid: winningBid });
     res.json({ ended: true, message: "Bidding ended and the winning bidder was processed.", result });
   } catch (error) {
-    res.status(500).json({ error: error.message || "Could not end bidding now." });
+    res.status(500).json({ error: publicErrorMessage(error, "Could not end bidding now.") });
   }
 });
 
@@ -971,7 +1061,7 @@ app.post("/api/admin/originals/:id/charge-second-highest", requireAdmin, async (
     const result = await processSingleAuctionAutoCharge(art, { force: true, selectedBid: secondHighestBid });
     res.json({ message: "Second-highest bidder was processed.", result });
   } catch (error) {
-    res.status(500).json({ error: error.message || "Could not process second-highest bidder." });
+    res.status(500).json({ error: publicErrorMessage(error, "Could not process second-highest bidder.") });
   }
 });
 
@@ -1016,8 +1106,8 @@ app.post("/api/admin/printful/sync-products", requireAdmin, async (req, res) => 
     const results = db.upsertPrintfulPrints(syncData.importedProducts);
     res.json({ message: "Printful product sync complete.", printfulProductCount: syncData.printfulProductCount, importedVariantCount: syncData.importedProducts.length, createdCount: results.filter((item) => item.action === "created").length, updatedCount: results.filter((item) => item.action === "updated").length, results, skipped: syncData.skipped });
   } catch (error) {
-    console.error("Printful sync failed:", error);
-    res.status(500).json({ error: error.message || "Printful sync failed." });
+    logger.error("Printful sync failed:", error);
+    res.status(500).json({ error: publicErrorMessage(error, "Printful sync failed.") });
   }
 });
 
@@ -1028,7 +1118,7 @@ app.get(["/", "/index.html", "/originals.html", "/prints.html", "/success.html",
 
 app.use((error, req, res, next) => {
   if (res.headersSent) return next(error);
-  console.error(`[request failed] ${req.method} ${req.path}: ${error.message}`);
+  logger.error(`[request failed] ${req.method} ${req.path}: ${error.message}`);
   const status = error.type === "entity.parse.failed" ? 400 : 500;
   res.status(status).json({ error: status === 400 ? "Invalid request data." : "Could not complete this request. Please try again." });
 });
@@ -1042,10 +1132,10 @@ async function syncPrintfulOnStartup(force = false) {
     const syncData = await printful.fetchPrintfulProductsForWebsite();
     const results = db.upsertPrintfulPrints(syncData.importedProducts);
     if (syncData.complete) db.archiveMissingPrintfulPrints(syncData.importedProducts.map((item) => item.printfulSyncVariantId));
-    console.log(`[printful startup sync] imported ${syncData.importedProducts.length} variants from ${syncData.printfulProductCount} products; created ${results.filter((item) => item.action === "created").length}, updated ${results.filter((item) => item.action === "updated").length}`);
-    if (syncData.skipped.length) console.warn(`[printful startup sync] skipped ${syncData.skipped.length} products or variants.`);
+    logger.log(`[printful startup sync] imported ${syncData.importedProducts.length} variants from ${syncData.printfulProductCount} products; created ${results.filter((item) => item.action === "created").length}, updated ${results.filter((item) => item.action === "updated").length}`);
+    if (syncData.skipped.length) logger.warn(`[printful startup sync] skipped ${syncData.skipped.length} products or variants.`);
   } catch (error) {
-    console.error("[printful startup sync] failed:", error.message || error);
+    logger.error("[printful startup sync] failed:", error.message || error);
   } finally { printfulSyncRunning = false; }
 }
 
@@ -1053,47 +1143,50 @@ async function configurePrintfulWebhookOnStartup() {
   if (String(process.env.PRINTFUL_WEBHOOK_ON_STARTUP || "false").toLowerCase() !== "true") return;
   const webhookUrl = String(process.env.PRINTFUL_WEBHOOK_URL || "").trim();
   if (!webhookUrl) {
-    console.error("[printful webhook setup] PRINTFUL_WEBHOOK_URL is not configured.");
+    logger.error("[printful webhook setup] PRINTFUL_WEBHOOK_URL is not configured.");
     return;
   }
   if (/your-site\.onrender\.com/i.test(webhookUrl)) {
-    console.error("[printful webhook setup] Refusing to configure the placeholder your-site.onrender.com URL.");
+    logger.error("[printful webhook setup] Refusing to configure the placeholder your-site.onrender.com URL.");
     return;
   }
   try {
     const result = await printful.configureWebhooks({ url: webhookUrl, types: ["package_shipped"] });
     const configuredUrl = result?.result?.url || webhookUrl;
-    let safeConfiguredUrl = configuredUrl;
+    let safeConfiguredUrl = "[invalid webhook URL]";
     try {
       const parsed = new URL(configuredUrl);
       safeConfiguredUrl = `${parsed.origin}${parsed.pathname}`;
     } catch { /* Keep a non-sensitive fallback for malformed configuration. */ }
-    console.log(`[printful webhook setup] configured ${safeConfiguredUrl}`);
-    console.warn("[printful webhook setup] Set PRINTFUL_WEBHOOK_ON_STARTUP=false after this one-time setup.");
+    logger.log(`[printful webhook setup] configured ${safeConfiguredUrl}`);
+    logger.warn("[printful webhook setup] Set PRINTFUL_WEBHOOK_ON_STARTUP=false after this one-time setup.");
   } catch (error) {
-    console.error("[printful webhook setup] failed:", error.message || error);
+    logger.error("[printful webhook setup] failed:", error.message || error);
   }
 }
 
 function startServer() {
   const server = app.listen(PORT, async () => {
-  console.log(`Rayan Rao Art site running at http://localhost:${PORT}`);
+  logger.log(`Rayan Rao Art site running at http://localhost:${PORT}`);
   const releasedReservations = db.releaseStaleCheckoutReservations();
-  if (releasedReservations) console.log(`[checkout cleanup] released ${releasedReservations} stale reservation(s)`);
+  if (releasedReservations) logger.log(`[checkout cleanup] released ${releasedReservations} stale reservation(s)`);
   await syncPrintfulOnStartup();
   await configurePrintfulWebhookOnStartup();
-  if (!email.isEmailEnabled()) console.warn("[tracking] Verify a Resend domain and set RESEND_API_KEY and FROM_EMAIL before customer shipment emails can send.");
-  await orders.tick().catch((error) => console.error("[orders] retry worker:", error.message));
+  if (!email.isEmailEnabled()) logger.warn("[tracking] Verify a Resend domain and set RESEND_API_KEY and FROM_EMAIL before customer shipment emails can send.");
+  await orders.tick().catch((error) => logger.error("[orders] retry worker:", error.message));
+  await auctions.tick().catch((error) => logger.error("[auctions] worker:", error.message));
   });
-  const retryTimer = setInterval(() => orders.tick().catch((error) => console.error("[orders] retry worker:", error.message)), 60000);
+  const retryTimer = setInterval(() => orders.tick().catch((error) => logger.error("[orders] retry worker:", error.message)), 60000);
   retryTimer.unref();
+  const auctionTimer = setInterval(() => auctions.tick().catch((error) => logger.error("[auctions] worker:", error.message)), 15000);
+  auctionTimer.unref();
   const syncInterval = Number(process.env.PRINTFUL_SYNC_INTERVAL_MS ?? 900000);
   const syncTimer = Number.isFinite(syncInterval) && syncInterval >= 60000
     ? setInterval(() => syncPrintfulOnStartup(true), syncInterval) : null;
   syncTimer?.unref();
-  server.on("close", () => { clearInterval(retryTimer); if (syncTimer) clearInterval(syncTimer); });
+  server.on("close", () => { clearInterval(retryTimer); clearInterval(auctionTimer); if (syncTimer) clearInterval(syncTimer); });
   return server;
 }
 
 if (require.main === module) startServer();
-module.exports = { app, startServer, orders };
+module.exports = { app, startServer, orders, auctions };

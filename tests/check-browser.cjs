@@ -21,12 +21,15 @@ async function main() {
       const page = await context.newPage();
       const errors = [];
       page.on("pageerror", (error) => errors.push(error.message));
+      page.on("console", (message) => {
+        if (/violates.*content security|refused to (?:load|execute|connect)/i.test(message.text())) errors.push(message.text());
+      });
       await page.route("**/*", (route) => route.request().url().startsWith(base) ? route.continue() : route.abort());
       for (const url of ["/", "/originals.html", "/prints.html", "/print-club.html", "/terms.html", "/privacy.html", "/shipping-policy.html", "/refunds-returns.html"]) {
         assert.equal((await page.goto(base + url)).status(), 200);
         await page.waitForLoadState("networkidle");
         for (const img of await page.locator("img").all()) {
-          await img.locator("..").scrollIntoViewIfNeeded();
+          await img.evaluate((element) => element.scrollIntoView({ block: "center", behavior: "instant" }));
           await img.evaluate((element) => element.decode());
         }
         assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth + 1), false, `Overflow: ${url} at ${width}`);
@@ -73,6 +76,25 @@ async function main() {
         assert.ok(url.searchParams.get("body").includes("pricing"));
         assert.equal(await card.locator(".original-contact-email").innerText(), "artwithrayan@gmail.com");
       }
+
+      const lightShipping = page.locator('[data-original-id="the-light"] .original-shipping');
+      assert.equal(await page.locator(".original-shipping").count(), 2);
+      await lightShipping.locator("summary").click();
+      await lightShipping.locator('[name="state"]').selectOption("NC");
+      await lightShipping.locator("button").click();
+      await page.waitForFunction(() => document.querySelector('[data-original-id="the-light"] [data-shipping-estimate-result]').textContent.startsWith("$45"));
+      await lightShipping.locator('[name="state"]').selectOption("CA");
+      assert.doesNotMatch(await lightShipping.locator('[role="status"]').innerText(), /\$45/);
+      await lightShipping.locator("button").click();
+      await page.waitForFunction(() => document.querySelector('[data-original-id="the-light"] [data-shipping-estimate-result]').textContent.startsWith("$65"));
+      await lightShipping.locator('[name="country"]').selectOption("OTHER");
+      assert.equal(await lightShipping.locator('[name="state"]').isVisible(), false);
+      assert.doesNotMatch(await lightShipping.locator('[role="status"]').innerText(), /\$/);
+      await lightShipping.locator("button").click();
+      await page.waitForFunction(() => document.querySelector('[data-original-id="the-light"] [data-shipping-estimate-result]').textContent.includes("international destinations"));
+      await page.screenshot({ path: path.join(output, `original-shipping-${width}.png`), fullPage: true });
+      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth + 1), false);
+      await lightShipping.locator("summary").click();
 
       const sunBeam = page.locator('[data-original-id="sun-beam"]');
       const rotatingImage = sunBeam.locator(".rotating-art-image img");

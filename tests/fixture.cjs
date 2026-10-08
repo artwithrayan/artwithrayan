@@ -12,11 +12,12 @@ Object.assign(process.env, {
   PRINTFUL_WEBHOOK_ON_STARTUP: "false", PRINTFUL_WEBHOOK_SECRET: "test-printful",
   RESEND_API_KEY: "", FROM_EMAIL: "Rayan Rao Art <shipping@artwithrayan.com>",
   GOOGLE_SERVICE_ACCOUNT_EMAIL: "", GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY: "", GOOGLE_SHEETS_SPREADSHEET_ID: "",
-  BASE_URL: "http://localhost:3000"
+  BASE_URL: process.env.TEST_BASE_URL || "http://localhost:3000"
 });
 
 const sessions = new Map();
 const calls = { drafts: 0, sheets: 0, emails: 0, refunds: 0, checkouts: 0 };
+const setupIntents = new Map();
 const failures = { drafts: false, sheets: false, emails: false };
 const sdk = new RealStripe("sk_test_local_fixture");
 class StripeMock {
@@ -27,9 +28,13 @@ class StripeMock {
         calls.checkouts++;
         const id = `cs_test_${calls.checkouts}`;
         const session = { ...config, id, url: `https://example.invalid/${id}`, status: "open", payment_status: "unpaid", currency: "usd",
-          amount_total: config.line_items.reduce((sum, line) => sum + line.price_data.unit_amount * line.quantity, 0),
+          amount_total: (config.line_items || []).reduce((sum, line) => sum + line.price_data.unit_amount * line.quantity, 0),
           payment_intent: { id: `pi_${id}`, latest_charge: { refunded: false, amount_refunded: 0 } } };
         sessions.set(id, session);
+        if (config.mode === "setup") {
+          session.setup_intent = `seti_${id}`;
+          setupIntents.set(session.setup_intent, { customer: config.customer, status: "succeeded", usage: "off_session", payment_method: `pm_${id}`, metadata: config.setup_intent_data.metadata });
+        }
         return session;
       },
       retrieve: async (id) => {
@@ -38,6 +43,8 @@ class StripeMock {
       }
     } };
     this.refunds = { create: async () => { calls.refunds++; return { id: "re_test" }; } };
+    this.customers = { create: async ({ email }) => ({ id: `cus_${email}` }) };
+    this.setupIntents = { retrieve: async (id) => setupIntents.get(id) };
   }
 }
 const load = Module._load;

@@ -107,6 +107,43 @@ Checkout and fulfillment estimates must both be in USD; mixed-currency quotes ar
 
 International fulfillment estimates and drafts include the customer's actual product price as the USD retail value. Optional mailing-address fields are preserved as entered rather than replaced with values from the Stripe billing address.
 
+The Light and Sun Beam offer a country/state shipping estimator while remaining email-inquiry-only. The server assumes a 4 lb packed parcel from North Carolina, adds a $14 or $16 packing allowance respectively to a regional store allowance ($20-$38), adds a 25% cushion, and rounds upward to $5. These are conservative store estimates, not carrier tariffs or guaranteed shipping prices. Contiguous-US estimates range from $45-$65 for The Light and $45-$70 for Sun Beam. Alaska, Hawaii, and other destinations require an individual email quote. Confirm packed dimensions, destination, and insurance before agreeing on the final amount. Profiles and regional allowances live in src/shipping.js; this estimator does not collect street addresses, create orders, or change Printful shipping.
+
+## Original Auctions
+
+Auctions are opt-in. `config/auctions.json` is intentionally empty; deploying this feature does not start an auction or restore the old auction/admin endpoints. Ordinary originals stay email-inquiry-only. A configuration entry has `id` (unique lowercase slug), `originalId`, `startingPrice` in USD, `startsAt`, and `endsAt` as ISO dates with explicit UTC offsets. Supply the starting minimum and closing time before adding an entry. Only The Light and Sun Beam currently have the supported shipping profiles. Existing database auctions are never reset or repriced by a deployment or by removing their configuration entry.
+
+The opening price is also the minimum selling price, with no hidden reserve. Bidders verify email, review a private maximum bid plus fixed destination-based shipping, explicitly authorize the maximum total, and save a card through Stripe Checkout setup mode before their first bid is accepted. Subsequent increases need fresh explicit authorization. A bidder's shipping address and charge are locked after their first accepted bid. The actual charge is the winning bid plus accepted shipping, never the losing bidder's maximum or an extra processing fee. The 4 lb NC shipping allowances are store charges, not carrier quotes; the store bears any difference in postage/insurance. Auction totals do not add tax at settlement: review your tax obligations and account for any seller-remitted tax within the advertised amounts before activation.
+
+Automatic maximum bidding uses $5/$10/$25/$50 increments at $100/$500/$1,000 thresholds. Tied maximums favor the earlier accepted maximum. Competing last-minute bids extend the closing time to two minutes after receipt. The persistent worker checks every 15 seconds and resumes on startup. Keep the service always on and `DB_PATH` on the persistent disk. Back up the database, which now contains bid authorizations, shipping addresses, private maxima, and payment references. Full card numbers and CVC are held by Stripe, not this application.
+
+The worker records one winner, creates a Stripe PaymentIntent without charging, saves its ID, then confirms it off-session. Network ambiguity is reconciled using that same intent. An unknown creation outcome older than 23 hours goes to manual review rather than risking a second intent after Stripe's idempotency window. If the bank declines or requests verification, the original intent is cancelled before a separate card-only Checkout recovery link is offered. Winners get up to 24 hours to pay; unpaid auctions remain held for review. Runners-up are never charged automatically. Paid originals enter the existing Google Sheets queue and remain self-fulfilled, never Printful orders. Auction emails have a persisted retry queue.
+
+Before enabling a real auction:
+
+- Set `BASE_URL` to the exact canonical HTTPS site origin and use it consistently; alternate domains should redirect there. The auction API rejects cross-origin writes.
+- Verify Stripe, `STRIPE_WEBHOOK_SECRET`, Resend, and `FROM_EMAIL` in the intended test/live mode. Registration is disabled if required integrations are unconfigured. Readiness checks detect configuration, not actual account permissions or email deliverability.
+- On the existing Stripe event destination, include `checkout.session.completed`, `checkout.session.expired`, `payment_intent.succeeded`, and `payment_intent.payment_failed`, keeping the site's other enabled checkout events. Do not change the webhook URL or secret simply for this feature.
+- Run a real Stripe **test-mode** walkthrough, including a declined card and an authentication-required card, with test email delivery. Automated tests use mocked providers; they do not verify your live Stripe account, Resend domain, or webhook subscriptions.
+- Review the published auction rules and tax/shipping arrangements before accepting real bids. This implementation does not resolve legal or tax obligations for you.
+
+Owner controls require server shell access, not a public admin page:
+
+```powershell
+npm run auctions -- status
+npm run auctions -- cancel AUCTION_ID --reason "Reason to send to bidders"
+```
+
+Run these against the correct database (Render Shell for deployed auctions). Cancellation is only allowed before payment processing starts and emails accepted bidders. Removing an entry from the configuration is NOT cancellation. Payment-stage issues and relisting need review, not editing prices or deleting bid records. Owner emails default to `artwithrayan@gmail.com`; `AUCTION_OWNER_EMAIL` can override this. The owner is notified of successful payments, payment problems, unsold auctions, and manual-review cases.
+
+`tests/auctions.test.js` covers winner-only charging, consent, bid races, deadlines, shipping locks, late setup, duplicates, failure recovery, and cleanup isolation. `tests/check-auction-browser.cjs` checks the real local HTTP flow against mocked providers at desktop and mobile widths. No real cards are charged by these tests.
+
+`npm run preview:auctions` starts a loopback-only, temporary-database demo at `http://localhost:3115/auction.html?id=light-demo`. All providers are mocked, the email code is `123456`, and the card step is simulated. Never deploy this test helper or use it to take real bids. It does not run settlement or change the store database/configuration.
+
+For a real Stripe **test-mode** walkthrough, run `npm run test:auctions:stripe` and open `http://localhost:3116/test-control`. Requires Stripe CLI on PATH (or `STRIPE_CLI_PATH`), a local `sk_test_` key, and the local Resend key. This runner uses `shipping@artwithrayan.com` as its sender (override with `AUCTION_TEST_FROM_EMAIL` if needed), without editing `.env`. Emails are limited to `artwithrayan@gmail.com` and its plus aliases and clearly labeled as tests. Use actual email verification codes and Stripe's `4242 4242 4242 4242` test card with a future expiry and any three-digit CVC; never use a real card.
+
+Each run creates a fresh temporary SQLite database, disables Printful and Google Sheets, ignores production auction configuration, and starts its own test-only Stripe listener with an in-memory signing secret. Live keys and live webhook events are rejected. The control page can close only this local test auction and process its test payment. Stop with Ctrl+C. Nothing is deployed or pushed; this helper must never be used as the production start command. Test-mode Stripe objects and emails to your own inbox are real external test artifacts; email acceptance does not prove inbox delivery. Restarting creates a different test auction and database.
+
 ## Images And Tests
 
 Responsive WebP assets are checked in, with content-hashed filenames and long cache lifetimes. Source photographs are preserved. Gallery images load lazily; the homepage image uses higher loading priority. To regenerate after replacing source images, install or provide Sharp to scripts/optimize-images.cjs (IMAGE_TOOLS_MODULES can point to the bundled Node modules directory).
@@ -120,3 +157,13 @@ npm run export:orders
 ```
 
 Before deploying, run tests and npm audit, back up the production database, deploy, confirm the required environment variables, and verify one end-to-end test order and tracking email. Do not run production load tests without limits.
+
+## Secret Safety
+
+Keep production credentials in Render environment variables or secret files, never in public assets or Git. Keep local credentials in the ignored .env file. Never attach that file, service-account JSON, private keys, or complete webhook URLs to screenshots or chats. Application logs redact configured secrets and common token formats; SDK error request objects are omitted. This is defense in depth, not a guarantee against every possible disclosure.
+
+Run `npm run security:secrets` before committing and `npm run security:history` to scan all locally available Git refs. Reports contain filenames and credential types, not secret values. The checker compares against configured local secrets and known patterns; it cannot recognize every arbitrary token. The GitHub workflow runs the working-tree check and the production dependency audit on pushes and pull requests. It does not itself stop Render auto-deploys: configure Render to wait for CI checks, and enable GitHub secret scanning/push protection where available.
+
+Use MFA/passkeys and unique passwords for GitHub, Render, Stripe, Printful, Resend, and Google. Restrict collaborators and API permissions to what the integrations need; use a Resend sending-only key and share only the order spreadsheet with the Google service account. Do not change Stripe/Printful scopes without testing the checkout, fulfillment, refund, sync, and tracking operations they support.
+
+Treat any credential pasted into a chat, public repository, or shared log as exposed. Rotate it at its provider, update Render and the local environment, verify the integration, then revoke the old credential. For Printful webhook-token rotation, update both PRINTFUL_WEBHOOK_SECRET and the token in the webhook destination URL together; re-register the destination and verify shipment delivery. Do not assume redaction removes historical logs or copies, and do not rewrite Git history or revoke production credentials without coordinating the deployment.

@@ -1,3 +1,4 @@
+const { logger } = require("./security");
 const { Resend } = require("resend");
 
 const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null;
@@ -23,12 +24,12 @@ function isEmailEnabled() {
 
 async function sendEmail({ to, subject, html, idempotencyKey }) {
   if (!resend) {
-    console.log("[email skipped] RESEND_API_KEY is not configured.", { to, subject });
+    logger.log("[email skipped] RESEND_API_KEY is not configured.", { to, subject });
     return { skipped: true, reason: "RESEND_API_KEY is not configured." };
   }
 
   if (!to) {
-    console.log("[email skipped] Missing recipient.", { subject });
+    logger.log("[email skipped] Missing recipient.", { subject });
     return { skipped: true, reason: "Missing recipient." };
   }
   if (/onboarding@resend\.dev/i.test(FROM_EMAIL)) {
@@ -45,10 +46,10 @@ async function sendEmail({ to, subject, html, idempotencyKey }) {
     if (result?.error) throw Object.assign(new Error(result.error.message || "Resend rejected the email."), result.error);
     if (!result?.data?.id && !result?.id) throw new Error("Resend did not confirm an email ID.");
 
-    console.log("[email sent]", { to, subject, id: result?.data?.id || result?.id || null });
+    logger.log("[email sent]", { to, subject, id: result?.data?.id || result?.id || null });
     return { sent: true, result };
   } catch (error) {
-    console.error("[email failed]", {
+    logger.error("[email failed]", {
       to,
       subject,
       message: error?.message || String(error),
@@ -87,6 +88,7 @@ async function sendShipmentTrackingEmail({ to, customerName, productName, carrie
 }
 
 module.exports = {
+  sendEmail,
   isEmailEnabled,
   sendShipmentTrackingEmail
 };

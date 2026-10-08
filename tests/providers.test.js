@@ -5,6 +5,24 @@ const originalFetch = global.fetch;
 afterEach(() => { global.fetch = originalFetch; });
 const response = (data, status = 200) => new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json" } });
 
+test("Printful credentials never follow redirects or go to another origin", async () => {
+  process.env.PRINTFUL_API_KEY = "synthetic-printful-token";
+  const { printfulFetch } = require("../src/printful");
+  let requests = 0;
+  global.fetch = async (url, options) => {
+    requests++;
+    assert.equal(new URL(url).origin, "https://api.printful.com");
+    assert.equal(options.redirect, "error");
+    return response({ result: [] });
+  };
+  for (const destination of ["https://example.invalid/products", "//example.invalid/products", "http://api.printful.com/products", "https://user:pass@api.printful.com/products"]) {
+    await assert.rejects(printfulFetch(destination), /Untrusted Printful/);
+  }
+  assert.equal(requests, 0);
+  await printfulFetch("/store/products");
+  assert.equal(requests, 1);
+});
+
 test("Printful retries reuse an existing external order ID", async () => {
   process.env.PRINTFUL_API_KEY = "test-key";
   process.env.PRINTFUL_AUTO_CREATE_DRAFT_ORDER = "true";

@@ -1,3 +1,4 @@
+const { redactSecrets, logger } = require("./security");
 const PRINTFUL_BASE_URL = "https://api.printful.com";
 let countriesCache = null;
 let countriesRequest = null;
@@ -45,13 +46,15 @@ async function printfulFetch(path, options = {}) {
     throw new Error("PRINTFUL_API_KEY is not configured in .env.");
   }
 
-  const url = path.startsWith("http") ? path : `${PRINTFUL_BASE_URL}${path}`;
+  const url = new URL(path, PRINTFUL_BASE_URL);
+  if (url.origin !== PRINTFUL_BASE_URL || url.username || url.password) throw new Error("Untrusted Printful API destination.");
   const method = options.method || "GET";
   const body = options.body;
 
   async function attempt(mode) {
-    return fetch(url, {
+    return fetch(url.href, {
       method,
+      redirect: "error",
       headers: {
         ...authHeaders(mode),
         "Content-Type": "application/json",
@@ -70,7 +73,7 @@ async function printfulFetch(path, options = {}) {
   try { data = text ? JSON.parse(text) : null; } catch { data = { raw: text }; }
 
   if (!response.ok) {
-    const detail = data?.error?.message || data?.message || response.statusText;
+    const detail = redactSecrets(data?.error?.message || data?.message || response.statusText);
     throw Object.assign(new Error(`Printful API error ${response.status}: ${detail}`), { statusCode: response.status });
   }
 
@@ -255,14 +258,14 @@ async function configureWebhooks({ url, types = ["package_shipped"] }) {
 
 async function createDraftOrderFromStripeSession({ payment, print, stripeSession }) {
   const autoCreate = String(process.env.PRINTFUL_AUTO_CREATE_DRAFT_ORDER || "false").toLowerCase() === "true";
-  if (!autoCreate) { console.log("[printful skipped] PRINTFUL_AUTO_CREATE_DRAFT_ORDER is false."); return { skipped: true, reason: "Auto creation disabled." }; }
-  if (!getPrintfulToken()) { console.log("[printful skipped] PRINTFUL_API_KEY is not configured."); return { skipped: true, reason: "Missing Printful API key." }; }
+  if (!autoCreate) { logger.log("[printful skipped] PRINTFUL_AUTO_CREATE_DRAFT_ORDER is false."); return { skipped: true, reason: "Auto creation disabled." }; }
+  if (!getPrintfulToken()) { logger.log("[printful skipped] PRINTFUL_API_KEY is not configured."); return { skipped: true, reason: "Missing Printful API key." }; }
 
   let storedRecipient = null;
   try { storedRecipient = payment.shipping_json ? JSON.parse(payment.shipping_json).recipient : null; } catch { storedRecipient = null; }
   const address = stripeSession.customer_details?.address;
   const name = storedRecipient?.name || stripeSession.customer_details?.name;
-  if ((!address && !storedRecipient) || !name) { console.log("[printful skipped] Missing shipping address/customer name."); return { skipped: true, reason: "Missing customer shipping details." }; }
+  if ((!address && !storedRecipient) || !name) { logger.log("[printful skipped] Missing shipping address/customer name."); return { skipped: true, reason: "Missing customer shipping details." }; }
 
   const recipient = {
     name,
@@ -318,7 +321,7 @@ async function createDraftOrderFromStripeSession({ payment, print, stripeSession
     return createOrder(payload);
   }
 
-  console.log("[printful skipped] Product has no Printful sync variant or manual variant/file data.", print.id);
+  logger.log("[printful skipped] Product has no Printful sync variant or manual variant/file data.", print.id);
   return { skipped: true, reason: "Missing Printful sync variant data." };
 }
 

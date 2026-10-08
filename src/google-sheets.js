@@ -1,4 +1,5 @@
 const crypto = require("crypto");
+const { redactSecrets } = require("./security");
 
 const SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets";
 const TOKEN_URL = "https://oauth2.googleapis.com/token";
@@ -42,12 +43,13 @@ async function getAccessToken() {
   const assertion = `${header}.${claim}.${encodeBase64Url(signer.sign(config.privateKey))}`;
   const response = await fetch(TOKEN_URL, {
     method: "POST",
+    redirect: "error",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({ grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer", assertion }),
     signal: AbortSignal.timeout(20000)
   });
   const data = await response.json();
-  if (!response.ok || !data.access_token) throw new Error(`Google authorization failed: ${data.error_description || data.error || response.statusText}`);
+  if (!response.ok || !data.access_token) throw new Error(`Google authorization failed: ${redactSecrets(data.error_description || data.error || response.statusText)}`);
   tokenCache = { value: data.access_token, expiresAt: Date.now() + Number(data.expires_in || 3600) * 1000 };
   return tokenCache.value;
 }
@@ -56,11 +58,12 @@ async function sheetsRequest(path, options = {}) {
   const token = await getAccessToken();
   const response = await fetch(`${API_BASE}/${getConfig().spreadsheetId}${path}`, {
     ...options,
+    redirect: "error",
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", ...(options.headers || {}) },
     signal: AbortSignal.timeout(20000)
   });
   const data = await response.json();
-  if (!response.ok) throw new Error(`Google Sheets API error ${response.status}: ${data.error?.message || response.statusText}`);
+  if (!response.ok) throw new Error(`Google Sheets API error ${response.status}: ${redactSecrets(data.error?.message || response.statusText)}`);
   return data;
 }
 

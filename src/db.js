@@ -1225,7 +1225,7 @@ function releaseStaleCheckoutReservations() {
   const stalePayments = db.prepare(`
     SELECT id, kind, original_id, print_id, stripe_session_id
     FROM payments
-    WHERE status='pending' AND stripe_session_id LIKE 'pending-%' AND created_at < datetime('now', '-30 minutes')
+    WHERE status='pending' AND stripe_session_id LIKE 'pending-%' AND stripe_session_id NOT LIKE 'pending-auction-%' AND created_at < datetime('now', '-30 minutes')
   `).all();
 
   const release = db.transaction((payments) => {
@@ -1297,6 +1297,7 @@ function getPaidPaymentForOriginal(originalId) {
 }
 
 module.exports = {
+  sqlite: db,
   getOriginals,
   getAllOriginalsForAdmin,
   getOriginalById,

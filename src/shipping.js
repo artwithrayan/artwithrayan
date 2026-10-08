@@ -112,8 +112,49 @@ function estimateSelfFulfillmentShipping(product, recipient = {}) {
   };
 }
 
+const ORIGINAL_SHIPPING_PROFILES = {
+  "the-light": { weightLb: 4, packingAllowance: 14 },
+  "sun-beam": { weightLb: 4, packingAllowance: 16 }
+};
+const ORIGINAL_DESTINATION_BANDS = [
+  { states: ["NC"], carrierAllowance: 20 },
+  { states: ["SC", "VA", "WV", "TN", "GA", "KY"], carrierAllowance: 24 },
+  { states: ["AL", "FL", "MS", "MD", "DC", "DE", "PA", "NJ", "NY", "OH"], carrierAllowance: 28 },
+  { states: ["AR", "LA", "MO", "IL", "IN", "MI", "WI", "CT", "RI", "MA", "VT", "NH", "ME", "IA", "MN", "KS", "OK", "TX", "NE", "SD", "ND"], carrierAllowance: 32 },
+  { states: ["CO", "NM", "WY", "MT", "ID", "UT", "AZ", "NV", "CA", "OR", "WA"], carrierAllowance: 38 }
+];
+
+function hasOriginalShippingProfile(id) {
+  return Object.hasOwn(ORIGINAL_SHIPPING_PROFILES, id);
+}
+
+function estimateOriginalDestinationShipping(id, destination = {}) {
+  if (!hasOriginalShippingProfile(id)) throw Object.assign(new Error("Shipping for this artwork is quoted by email."), { statusCode: 400 });
+  const country = String(destination.country || "").trim().toUpperCase();
+  const state = String(destination.state || "").trim().toUpperCase();
+  if (!["US", "OTHER"].includes(country)) throw Object.assign(new Error("Choose a shipping destination."), { statusCode: 400 });
+  if (country === "OTHER" || ["AK", "HI"].includes(state)) return {
+    requiresManualQuote: true,
+    note: "Please email for a shipping quote to Alaska, Hawaii, US territories, military addresses, or international destinations."
+  };
+  const band = ORIGINAL_DESTINATION_BANDS.find((entry) => entry.states.includes(state));
+  if (!band) throw Object.assign(new Error("Choose a valid destination state."), { statusCode: 400 });
+  const profile = ORIGINAL_SHIPPING_PROFILES[id];
+  // Store allowances, not carrier tariffs: 25% headroom, rounded up to $5.
+  const subtotal = band.carrierAllowance + profile.packingAllowance;
+  const total = Math.ceil(subtotal * 1.25 / 5) * 5;
+  return {
+    requiresManualQuote: false, total, currency: "USD", originState: "NC",
+    destinationState: state, weightLb: profile.weightLb,
+    breakdown: { carrierAllowance: band.carrierAllowance, packingAllowance: profile.packingAllowance, buffer: total - subtotal },
+    note: "Estimated shipping and protective packing from North Carolina, assuming a 4 lb package. Not a live carrier quote. Final cost, including any insurance, is confirmed by email after checking the packed dimensions and destination."
+  };
+}
+
 module.exports = {
   parseSizeInches,
   estimateOriginalShipping,
-  estimateSelfFulfillmentShipping
+  estimateSelfFulfillmentShipping,
+  hasOriginalShippingProfile,
+  estimateOriginalDestinationShipping
 };

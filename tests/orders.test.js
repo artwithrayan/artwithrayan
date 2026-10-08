@@ -20,6 +20,46 @@ test("payment records preserve cents", () => {
   assert.equal(payment.total_amount, 21.75);
   assert.equal(payment.shipping_amount, 4.99);
 });
+test("auction writes reject cross-site requests and require an authenticated bidder", async () => {
+  assert.equal((await fetch(base + "/api/auctions/the-light/quote", { method: "POST", headers: { "Content-Type": "application/json", origin: "https://attacker.invalid" }, body: "{}" })).status, 403);
+  assert.equal((await fetch(base + "/api/auctions/the-light/quote", { method: "POST", headers: { "Content-Type": "application/json", origin: "http://localhost:3000" }, body: "{}" })).status, 401);
+  const response = await fetch(base + "/api/auctions");
+  assert.equal(response.headers.get("cache-control"), "no-store");
+  assert.deepEqual(await response.json(), { auctions: [] });
+  assert.equal((await fetch(base + "/api/bidders")).status, 404);
+  assert.equal((await fetch(base + "/api/admin/originals")).status, 404);
+});
+
+test("private files cannot be requested and browser policy restricts script origins", async () => {
+  for (const pathname of ["/.env", "/.env.production", "/.git/config", "/data.sqlite", "/backup.db", "/dev-server.log", "/credentials.json", "/service-account.json", "/src/db.js", "/node_modules/dotenv/package.json", "/images/.env"]) {
+    const response = await fetch(base + pathname);
+    assert.equal(response.status, 404, pathname);
+    assert.deepEqual(await response.json(), { error: "Not found." });
+  }
+  const home = await fetch(base + "/");
+  const csp = home.headers.get("content-security-policy");
+  assert.match(csp, /script-src 'self' 'sha256-/);
+  assert.match(csp, /script-src-attr 'none'/);
+  assert.match(csp, /frame-ancestors 'none'/);
+  assert.equal(home.headers.has("x-powered-by"), false);
+});
+
+test("public shipping errors never return provider credentials", async () => {
+  const previous = process.env.SECURITY_TEST_API_KEY;
+  const estimate = f.printful.estimatePrintCosts;
+  process.env.SECURITY_TEST_API_KEY = "synthetic-shipping-provider-token";
+  f.printful.estimatePrintCosts = async () => { throw Object.assign(new Error(`Invalid API key ${process.env.SECURITY_TEST_API_KEY}`), { statusCode: 401 }); };
+  try {
+    const response = await printRequest("shipping-rate", { name: "Test Buyer", email: "test@example.com", address1: "123 Main St", city: "Raleigh", state: "NC", postalCode: "27601", country: "US" });
+    const result = await response.text();
+    assert.ok(!result.includes(process.env.SECURITY_TEST_API_KEY));
+    assert.ok(result.includes("Could not calculate shipping"));
+  } finally {
+    f.printful.estimatePrintCosts = estimate;
+    if (previous === undefined) delete process.env.SECURITY_TEST_API_KEY;
+    else process.env.SECURITY_TEST_API_KEY = previous;
+  }
+});
 
 test("unpaid completed events do not mark paid or fulfill", async () => {
   const payment = f.payment("cs_unpaid");
@@ -352,6 +392,28 @@ test("original checkout and shipping endpoints cannot create orders or reservati
   assert.equal(f.calls.checkouts, checkoutsBefore);
   assert.equal(f.sql.prepare("SELECT COUNT(*) AS count FROM payments").get().count, paymentsBefore);
   assert.deepEqual(f.db.getOriginalById("the-light"), artBefore);
+});
+
+test("original shipping estimates never create payments, reservations, or carrier orders", async () => {
+  const before = f.sql.prepare("SELECT COUNT(*) AS count FROM payments").get().count;
+  const originals = f.db.getOriginals();
+  const calls = { ...f.calls };
+  for (const [id, body, status] of [
+    ["the-light", { country: "US", state: "NC", total: 1, weightLb: 0 }, 200],
+    ["sun-beam", { country: "US", state: "CA" }, 200],
+    ["sun-beam", { country: "OTHER" }, 200],
+    ["the-light", { country: "US", state: "XX" }, 400],
+    ["flower", { country: "US", state: "NC" }, 400],
+    ["jazz-club", { country: "US", state: "NC" }, 409],
+    ["unknown", { country: "US", state: "NC" }, 404]
+  ]) {
+    const response = await fetch(`${base}/api/originals/${id}/shipping-estimate`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    assert.equal(response.status, status);
+    if (id === "the-light" && status === 200) assert.equal((await response.json()).estimate.total, 45);
+  }
+  assert.equal(f.sql.prepare("SELECT COUNT(*) AS count FROM payments").get().count, before);
+  assert.deepEqual(f.db.getOriginals(), originals);
+  assert.deepEqual(f.calls, calls);
 });
 
 test("missing webhook signing configuration fails closed", async () => {

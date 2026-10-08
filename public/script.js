@@ -152,7 +152,7 @@ async function renderOriginals() {
     if (!originals.length) { grid.innerHTML = "<p>No original paintings are currently available.</p>"; return; }
 
     grid.innerHTML = originals.map((art) => {
-      const isAvailable = ["active", "payment_pending"].includes(art.status);
+      const isAvailable = !art.auction && ["active", "payment_pending"].includes(art.status);
       const inquirySubject = `Purchase inquiry: ${art.title}`;
       const inquiryBody = `Hi Rayan,\n\nI'm interested in purchasing "${art.title}" (${art.size}, ${art.medium}).\n\nCould you confirm availability, pricing, and shipping?\n\nThank you,\n`;
       const inquiryUrl = `mailto:${inquiryEmail}?subject=${encodeURIComponent(inquirySubject)}&body=${encodeURIComponent(inquiryBody)}`;
@@ -168,14 +168,53 @@ async function renderOriginals() {
           </div>
           ${art.revealImageUrl ? `<button type="button" class="shine-button" data-id="${escapeHtml(art.id)}" aria-pressed="false">Shine a light</button>` : ""}
           ${art.id === "sun-beam" ? '<button type="button" class="rotation-button" aria-label="Pause Sun Beam rotation" aria-pressed="true">Pause rotation</button>' : ""}
+          ${art.auction ? `<div class="auction-summary"><span>${art.auction.status === "open" ? `${art.auction.bidCount ? "Current bid" : "Starting bid"}: ${money(art.auction.currentCents / 100)}` : escapeHtml(art.auction.status.replaceAll("_", " "))}</span><a class="button" href="auction.html?id=${encodeURIComponent(art.auction.id)}">View auction</a></div>` : ""}
+          ${isAvailable && art.canEstimateShipping ? `<details class="original-shipping"><summary>Shipping estimate</summary><form class="original-shipping-form" data-id="${escapeHtml(art.id)}"><label>Destination<select name="country" required><option value="US">United States</option><option value="OTHER">Other destinations</option></select></label><label data-estimate-state>State<select name="state" required>${US_STATE_OPTIONS}<option value="DC">District of Columbia</option></select></label><button type="submit">Estimate shipping</button><p class="notice" role="status" aria-live="polite" data-shipping-estimate-result>Shipping and protective packing estimate. Final cost confirmed by email.</p></form></details>` : ""}
           ${isAvailable ? `<a class="button original-inquiry" href="${escapeHtml(inquiryUrl)}" aria-label="${escapeHtml(`Email if interested in purchasing ${art.title}`)}">Email if interested in purchasing</a><a class="original-contact-email" href="${escapeHtml(inquiryUrl)}">${escapeHtml(inquiryEmail)}</a>` : ""}
         </article>`;
     }).join("");
     attachRevealHandlers();
     attachRotationHandlers();
+    attachOriginalShippingEstimates();
   } catch (error) {
     grid.innerHTML = `<p class="notice error">Could not load originals. Make sure the backend is running.</p>`;
   }
+}
+
+function attachOriginalShippingEstimates() {
+  document.querySelectorAll(".original-shipping-form").forEach((form) => {
+    const result = form.querySelector("[data-shipping-estimate-result]");
+    const button = form.querySelector("button");
+    let revision = 0;
+    form.addEventListener("change", () => {
+      revision++;
+      button.disabled = false;
+      const domestic = form.elements.country.value === "US";
+      form.querySelector("[data-estimate-state]").hidden = !domestic;
+      form.elements.state.disabled = !domestic;
+      form.elements.state.required = domestic;
+      result.className = "notice";
+      result.textContent = domestic ? "Shipping and protective packing estimate. Final cost confirmed by email." : "Please email for a quote to this destination.";
+    });
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const current = ++revision;
+      button.disabled = true;
+      result.className = "notice";
+      result.textContent = "Calculating estimate...";
+      try {
+        const { estimate } = await fetchJson(`${API}/api/originals/${encodeURIComponent(form.dataset.id)}/shipping-estimate`, {
+          method: "POST", body: JSON.stringify({ country: form.elements.country.value, state: form.elements.state.value })
+        });
+        if (revision !== current || !form.isConnected) return;
+        result.textContent = estimate.requiresManualQuote ? estimate.note : `${money(estimate.total)} USD estimated shipping and packing. ${estimate.note}`;
+      } catch (error) {
+        if (revision !== current || !form.isConnected) return;
+        result.className = "notice error";
+        result.textContent = error.message || "Please email for a shipping quote.";
+      } finally { if (revision === current) button.disabled = false; }
+    });
+  });
 }
 
 function attachRotationHandlers() {

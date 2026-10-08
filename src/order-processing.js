@@ -1,3 +1,4 @@
+const { logger, redactSecrets } = require("./security");
 const crypto = require("crypto");
 
 function createOrderProcessor({ db, stripe, printful, sheets, email }) {
@@ -17,7 +18,7 @@ function createOrderProcessor({ db, stripe, printful, sheets, email }) {
     const errors = [];
     const attempt = async (task, callback) => {
       try { await callback(); }
-      catch (error) { errors.push(`${task}: ${error.message || error}`); }
+      catch (error) { errors.push(`${task}: ${redactSecrets(error.message || error)}`); }
     };
     let print = payment.print_id ? db.getPrintById(payment.print_id) : null;
 
@@ -42,7 +43,7 @@ function createOrderProcessor({ db, stripe, printful, sheets, email }) {
         const result = await printful.createDraftOrderFromStripeSession({ payment, print, stripeSession: session });
         if (!result?.printfulOrderId) throw new Error(result?.reason || "Printful did not return an order ID.");
         db.setPaymentPrintfulOrderId(payment.id, String(result.printfulOrderId));
-        console.log(`[orders] Printful draft saved for order ${payment.id}`);
+        logger.log(`[orders] Printful draft saved for order ${payment.id}`);
       });
     }
 
@@ -52,7 +53,7 @@ function createOrderProcessor({ db, stripe, printful, sheets, email }) {
         const original = payment.original_id ? db.getOriginalById(payment.original_id) : null;
         if (!await sheets.appendPaidOrder({ payment, print, original })) throw new Error("Sheets did not confirm the update.");
         db.markPaymentGoogleSheetsSynced(payment.id);
-        console.log(`[orders] Sheet updated for order ${payment.id}`);
+        logger.log(`[orders] Sheet updated for order ${payment.id}`);
       });
     }
 
@@ -70,7 +71,7 @@ function createOrderProcessor({ db, stripe, printful, sheets, email }) {
       });
     }
     db.setOrderProcessingResult(paymentId, errors);
-    if (errors.length) console.error(`[orders] order ${paymentId} will retry: ${errors.join("; ")}`);
+    if (errors.length) logger.error(`[orders] order ${paymentId} will retry: ${errors.join("; ")}`);
     return { errors };
   }
 
@@ -85,7 +86,7 @@ function createOrderProcessor({ db, stripe, printful, sheets, email }) {
             const session = await stripe.checkout.sessions.retrieve(payment.stripe_session_id);
             if (session.payment_status === "paid") db.confirmCheckoutPayment(session);
             else if (session.status === "expired") db.cancelCheckoutReservation(session.id);
-          } catch (error) { console.error(`[checkout cleanup] order ${payment.id}: ${error.message}`); }
+          } catch (error) { logger.error(`[checkout cleanup] order ${payment.id}: ${error.message}`); }
         }
       }
       for (const payment of db.getPaymentsNeedingProcessing({ sheetsEnabled: sheets.isConfigured() })) await processPayment(payment.id);
