@@ -1,6 +1,6 @@
 # Rayan Rao Art
 
-Original paintings are available by email inquiry or a linked eBay listing, while prints use Stripe Checkout, SQLite order storage, Google Sheets reporting, and shipment tracking emails. Built-in auctions have been removed. Admin and new original checkout endpoints remain disabled. Print Club is coming soon.
+Original paintings are available by email offers, while prints use Stripe Checkout, SQLite order storage, Google Sheets reporting, and shipment tracking emails. Built-in auctions have been removed. Admin and new original checkout endpoints remain disabled. Print Club is coming soon.
 
 ## Original Painting Inquiries
 
@@ -107,11 +107,11 @@ Checkout and fulfillment estimates must both be in USD; mixed-currency quotes ar
 
 International fulfillment estimates and drafts include the customer's actual product price as the USD retail value. Optional mailing-address fields are preserved as entered rather than replaced with values from the Stripe billing address.
 
-The Light and Sun Beam retain internal shipping profiles, but their website estimators are hidden while they link to eBay. The server assumes a 4 lb packed parcel from North Carolina, adds a $14 or $16 packing allowance respectively to a regional store allowance ($20-$38), adds a 25% cushion, and rounds upward to $5. These are conservative store estimates, not carrier tariffs or guaranteed shipping prices. Contiguous-US estimates range from $45-$65 for The Light and $45-$70 for Sun Beam. Alaska, Hawaii, and other destinations require an individual email quote. Confirm packed dimensions, destination, and insurance before agreeing on the final amount. Profiles and regional allowances live in src/shipping.js; this estimator does not collect street addresses, create orders, or change Printful shipping.
+The Light and Sun Beam retain internal shipping profiles, but website estimators remain hidden while offers and shipping are arranged by email. The server assumes a 4 lb packed parcel from North Carolina, adds a $14 or $16 packing allowance respectively to a regional store allowance ($20-$38), adds a 25% cushion, and rounds upward to $5. These are conservative store estimates, not carrier tariffs or guaranteed shipping prices. Contiguous-US estimates range from $45-$65 for The Light and $45-$70 for Sun Beam. Alaska, Hawaii, and other destinations require an individual email quote. Confirm packed dimensions, destination, and insurance before agreeing on the final amount. Profiles and regional allowances live in src/shipping.js; this estimator does not collect street addresses, create orders, or change Printful shipping.
 
-## External Auctions
+## Original Offers and Commissions
 
-Sun Beam links to https://ebay.io/m/WRlkwy and The Light links to https://ebay.io/m/JAhrjQ using "Bid on eBay" buttons. Their email purchase links and website shipping estimators are hidden. Other available originals retain email inquiry. Mark a piece sold when its external sale is complete; eBay status is not automatically synchronized.
+Available originals use Make an offer email links; sold work has no purchase button. All offer, contact, and commission email links leave the subject and message blank. Commissions are accessible from the navigation and show existing commissioned originals. No eBay listings are linked.
 
 The built-in auction pages, bidder authentication, saved-card setup, automatic winner charging, recovery checkout, worker, CLI, and test runners have been removed. Retired /api/auctions requests return 410, and old auction pages are no longer served. Stripe events marked as retired auction flows or card setup are acknowledged without order processing. Print checkout, Printful, Google Sheets, and shipment tracking are unchanged.
 
@@ -140,3 +140,6 @@ Run `npm run security:secrets` before committing and `npm run security:history` 
 Use MFA/passkeys and unique passwords for GitHub, Render, Stripe, Printful, Resend, and Google. Restrict collaborators and API permissions to what the integrations need; use a Resend sending-only key and share only the order spreadsheet with the Google service account. Do not change Stripe/Printful scopes without testing the checkout, fulfillment, refund, sync, and tracking operations they support.
 
 Treat any credential pasted into a chat, public repository, or shared log as exposed. Rotate it at its provider, update Render and the local environment, verify the integration, then revoke the old credential. For Printful webhook-token rotation, update both PRINTFUL_WEBHOOK_SECRET and the token in the webhook destination URL together; re-register the destination and verify shipment delivery. Do not assume redaction removes historical logs or copies, and do not rewrite Git history or revoke production credentials without coordinating the deployment.
+
+
+Mockup framing in public/script.js compensates for measured white margins in specific Printful preview files. It applies in the gallery and purchase dialog. Unknown or replaced image URLs default to their full uncropped view. No artwork files or fulfillment designs are altered.

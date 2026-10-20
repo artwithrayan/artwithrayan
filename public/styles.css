@@ -156,18 +156,21 @@
 .variant-button:hover, .variant-button.active { background: var(--ink); color: var(--bg); border-color: var(--ink); }
 .product-options { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
 .product-option { border: 1px solid var(--line); padding: 7px 9px; color: var(--muted); font-size: 12px; text-transform: capitalize; }
-.print-dialog { width: min(680px, calc(100vw - 32px)); max-height: calc(100vh - 32px); border: 1px solid var(--ink); padding: 28px; background: var(--bg); color: var(--ink); }
+.print-dialog { width: min(1080px, calc(100vw - 32px)); max-height: calc(100vh - 32px); overflow: auto; border: 1px solid var(--ink); padding: 28px; background: var(--bg); color: var(--ink); }
 .print-dialog::backdrop { background: rgba(0, 0, 0, .42); }
 .dialog-close { display: block; margin-left: auto; background: var(--bg); color: var(--ink); padding: 8px 10px; }
 .dialog-heading { border-bottom: 1px solid var(--line); padding: 14px 0 18px; margin-bottom: 18px; }
-.dialog-heading h2 { margin: 0 0 8px; font-size: clamp(28px, 5vw, 48px); line-height: .95; font-weight: 500; }
+.dialog-heading h2 { margin: 0 0 8px; font-size: 28px; line-height: 1.15; font-weight: 500; overflow-wrap: anywhere; letter-spacing: 0; }
 .dialog-heading p { margin: 8px 0 0; }
 .print-product-note { color: var(--muted); font-size: 12px; line-height: 1.55; overflow-wrap: anywhere; }
 .dialog-price { font-weight: 600; color: var(--ink) !important; }
 .print-dialog .checkout-form { display: grid; margin-top: 0; border-top: 0; padding-top: 0; }
-.product-view-layout { display: grid; grid-template-columns: minmax(220px, .9fr) minmax(280px, 1.1fr); gap: 24px; align-items: start; }
+.product-view-layout { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(280px, 1fr); gap: 28px; align-items: start; }
+.product-purchase-info { min-width: 0; }
 .product-preview { min-width: 0; }
-.selected-product-image { width: 100%; aspect-ratio: 1 / 1.1; object-fit: contain; display: block; border: 1px solid var(--line); background: var(--soft); }
+.mockup-frame { width: 100%; aspect-ratio: 1; overflow: hidden; background: #fff; }
+.gallery-mockup { margin-bottom: 12px; }
+.mockup-frame .selected-product-image { width: 100%; height: 100%; max-width: none; object-fit: contain; display: block; transform: scale(var(--mockup-scale, 1)); transform-origin: center; }
 .product-thumbnails { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
 .product-thumbnail { width: 58px; height: 58px; padding: 0; border: 1px solid var(--line); background: var(--bg); }
 .product-thumbnail.active { border-color: var(--ink); }
@@ -180,7 +183,19 @@
 select { width: 100%; border: 1px solid var(--line); background: var(--bg); padding: 12px; border-radius: 0; font: inherit; }
 select:focus { outline: 1px solid var(--ink); }
 @media(max-width:680px) { .print-dialog { padding: 18px; } .compact-grid { grid-template-columns: 1fr; } }
-@media(max-width:760px) { .product-view-layout { grid-template-columns: 1fr; } .selected-product-image, .empty-preview { max-height: 360px; } }
+@media(max-width:760px) { .product-view-layout { grid-template-columns: minmax(0, 1fr); } .product-preview { width: 100%; max-width: 480px; margin-inline: auto; } }
+
+.nav { flex-wrap: wrap; align-items: center; }
+.nav .contact-button { font-size: 12px; letter-spacing: 0; padding: 9px 12px; }
+.contact-actions { display: flex; flex-wrap: wrap; gap: 16px; align-items: center; margin: 24px 0; }
+.contact-address { font-size: 14px; text-decoration: underline; overflow-wrap: anywhere; }
+.commission-intro { max-width: 760px; }
+.commission-intro h1 { font-size: 48px; line-height: 1.1; letter-spacing: 0; }
+.commission-intro p { font-size: 18px; }
+.commission-work { padding-top: 28px; border-top: 1px solid var(--line); }
+.commission-work h2 { font-size: 24px; font-weight: 500; margin: 0 0 24px; letter-spacing: 0; }
+.commission-work h3 { font-size: 16px; font-weight: 500; margin: 0 0 8px; }
+@media(max-width:680px) { .commission-intro h1 { font-size: 36px; } }
 /* Single homepage banner: keep the supplied artwork inside a predictable frame. */
 .art-banner { display: block; padding: 28px; border-bottom: 1px solid var(--line); min-width: 0; }
 .banner-image { width: 100%; max-width: 100%; aspect-ratio: 3 / 1; min-height: 220px; background: var(--soft) center / cover no-repeat; border: 1px solid var(--line); overflow: hidden; display: grid; place-items: center; color: var(--muted); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; }

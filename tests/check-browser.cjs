@@ -25,9 +25,16 @@ async function main() {
         if (/violates.*content security|refused to (?:load|execute|connect)/i.test(message.text())) errors.push(message.text());
       });
       await page.route("**/*", (route) => route.request().url().startsWith(base) ? route.continue() : route.abort());
-      for (const url of ["/", "/originals.html", "/prints.html", "/print-club.html", "/terms.html", "/privacy.html", "/shipping-policy.html", "/refunds-returns.html"]) {
+      for (const url of ["/", "/originals.html", "/prints.html", "/print-club.html", "/commissions.html", "/terms.html", "/privacy.html", "/shipping-policy.html", "/refunds-returns.html"]) {
         assert.equal((await page.goto(base + url)).status(), 200);
         await page.waitForLoadState("networkidle");
+        assert.equal(await page.locator(".nav a[href='commissions.html']").count(), 1);
+        assert.equal(await page.locator(".nav .contact-button").getAttribute("href"), "mailto:artwithrayan@gmail.com");
+        if (url === "/commissions.html") {
+          assert.equal(await page.locator(".commission-contact").getAttribute("href"), "mailto:artwithrayan@gmail.com");
+          assert.equal(await page.locator("#commissionsGrid article").count(), 3);
+          assert.equal(await page.locator("#commissionsGrid .original-inquiry").count(), 0);
+        }
         for (const img of await page.locator("img").all()) {
           await img.evaluate((element) => element.scrollIntoView({ block: "center", behavior: "instant" }));
           await img.evaluate((element) => element.decode());
@@ -66,26 +73,13 @@ async function main() {
           continue;
         }
         assert.equal(await card.locator(".original-status").count(), 0);
-        if (["sun-beam", "the-light"].includes(art.id)) {
-          const ebay = card.getByRole("link", { name: `Bid on ${art.title} on eBay (opens in a new tab)`, exact: true });
-          assert.equal(await ebay.textContent(), "Bid on eBay");
-          assert.equal(await ebay.getAttribute("href"), art.id === "sun-beam" ? "https://ebay.io/m/WRlkwy" : "https://ebay.io/m/JAhrjQ");
-          assert.equal(await ebay.getAttribute("target"), "_blank");
-          assert.equal(await ebay.getAttribute("rel"), "noopener noreferrer");
-          assert.equal(await inquiry.count(), 0);
-          assert.equal(await card.locator(".original-contact-email, .original-shipping").count(), 0);
-          continue;
-        }
         assert.equal(await card.locator(".original-ebay-auction").count(), 0);
-        assert.equal(await inquiry.textContent(), "Email if interested in purchasing");
+        assert.equal(await inquiry.textContent(), "Make an offer");
+        assert.equal(await inquiry.getAttribute("aria-label"), `Make an offer for ${art.title} by email`);
         const url = new URL(await inquiry.getAttribute("href"));
         assert.equal(url.protocol, "mailto:");
         assert.equal(url.pathname, "artwithrayan@gmail.com");
-        assert.equal(url.searchParams.get("subject"), `Purchase inquiry: ${art.title}`);
-        assert.ok(url.searchParams.get("body").includes(art.title));
-        assert.ok(url.searchParams.get("body").includes(art.size));
-        assert.doesNotMatch(url.searchParams.get("body"), /\$\s*\d/);
-        assert.ok(url.searchParams.get("body").includes("pricing"));
+        assert.equal(url.search, "", "Offers must not prefill a subject or message");
         assert.equal(await card.locator(".original-contact-email").innerText(), "artwithrayan@gmail.com");
       }
 
@@ -121,6 +115,11 @@ async function main() {
       await page.goto(base + "/prints.html");
       await page.locator(".view-products").first().click();
       const dialog = page.locator("#printPurchaseDialog");
+      assert.equal(await dialog.evaluate(el => el.scrollWidth <= el.clientWidth + 1), true);
+      if (width === 1440) assert.ok((await dialog.locator(".mockup-frame").boundingBox()).width > 450);
+      assert.equal(await page.evaluate(() => mockupScale("https://files.cdn.printful.com/files/f83/f8334bc650d63aeb980fa3d1fed8bb14_preview.png")), 1.94);
+      assert.equal(await page.evaluate(() => mockupScale("https://files.cdn.printful.com/files/new/mockup.png")), 1);
+      assert.equal(await page.evaluate(() => mockupScale("https://example.com/f8334bc650d63aeb980fa3d1fed8bb14_preview.png")), 1);
       await fillAddress(dialog);
       await dialog.locator(".quote-shipping").click();
       await page.waitForFunction(() => !document.querySelector("dialog button[type=submit]").disabled);

@@ -144,13 +144,7 @@ async function renderOriginals() {
 
     grid.innerHTML = originals.map((art) => {
       const isAvailable = ["active", "payment_pending"].includes(art.status);
-      const ebayAuctionUrl = {
-        "sun-beam": "https://ebay.io/m/WRlkwy",
-        "the-light": "https://ebay.io/m/JAhrjQ"
-      }[art.id] || "";
-      const inquirySubject = `Purchase inquiry: ${art.title}`;
-      const inquiryBody = `Hi Rayan,\n\nI'm interested in purchasing "${art.title}" (${art.size}, ${art.medium}).\n\nCould you confirm availability, pricing, and shipping?\n\nThank you,\n`;
-      const inquiryUrl = `mailto:${inquiryEmail}?subject=${encodeURIComponent(inquirySubject)}&body=${encodeURIComponent(inquiryBody)}`;
+      const inquiryUrl = `mailto:${inquiryEmail}`;
 
       return `
         <article class="product-card original-card" data-original-id="${escapeHtml(art.id)}">
@@ -163,9 +157,7 @@ async function renderOriginals() {
           </div>
           ${art.revealImageUrl ? `<button type="button" class="shine-button" data-id="${escapeHtml(art.id)}" aria-pressed="false">Shine a light</button>` : ""}
           ${art.id === "sun-beam" ? '<button type="button" class="rotation-button" aria-label="Pause Sun Beam rotation" aria-pressed="true">Pause rotation</button>' : ""}
-          ${isAvailable && !ebayAuctionUrl && art.canEstimateShipping ? `<details class="original-shipping"><summary>Shipping estimate</summary><form class="original-shipping-form" data-id="${escapeHtml(art.id)}"><label>Destination<select name="country" required><option value="US">United States</option><option value="OTHER">Other destinations</option></select></label><label data-estimate-state>State<select name="state" required>${US_STATE_OPTIONS}<option value="DC">District of Columbia</option></select></label><button type="submit">Estimate shipping</button><p class="notice" role="status" aria-live="polite" data-shipping-estimate-result>Shipping and protective packing estimate. Final cost confirmed by email.</p></form></details>` : ""}
-          ${isAvailable && ebayAuctionUrl ? `<a class="button original-ebay-auction" href="${escapeHtml(ebayAuctionUrl)}" target="_blank" rel="noopener noreferrer" aria-label="${escapeHtml(`Bid on ${art.title} on eBay (opens in a new tab)`)}">Bid on eBay</a>` : ""}
-          ${isAvailable && !ebayAuctionUrl ? `<a class="button original-inquiry" href="${escapeHtml(inquiryUrl)}" aria-label="${escapeHtml(`Email if interested in purchasing ${art.title}`)}">Email if interested in purchasing</a><a class="original-contact-email" href="${escapeHtml(inquiryUrl)}">${escapeHtml(inquiryEmail)}</a>` : ""}
+          ${isAvailable ? `<a class="button original-inquiry" href="${escapeHtml(inquiryUrl)}" aria-label="${escapeHtml(`Make an offer for ${art.title} by email`)}">Make an offer</a><a class="original-contact-email" href="${escapeHtml(inquiryUrl)}">${escapeHtml(inquiryEmail)}</a>` : ""}
         </article>`;
     }).join("");
     attachRevealHandlers();
@@ -262,13 +254,53 @@ function artworkPrintNote(artwork) {
     : "";
 }
 
+// Only compensate for measured empty margins in these specific Printful files.
+// New or changed mockups stay uncropped until their framing has been reviewed.
+const MOCKUP_SCALES = {
+  "46dfd5da2bca27e0e60c2c10fcfe623a_preview.png": 1.94,
+  "f8334bc650d63aeb980fa3d1fed8bb14_preview.png": 1.94,
+  "cc74f4a188d5bd4e1ec030cfb6b80ca1_preview.png": 1.94,
+  "2ea314510c02c56d8d8336c2be6ce6e1_preview.png": 1.94,
+  "396a70cf9f5c4f0c7aaf7384f269795d_preview.png": 1.36,
+  "8cf4bcc3ee8761106d39b7f45266be80_preview.png": 1.36,
+  "2b5499a899d3527f637848abc0fff896_preview.png": 1.36
+};
+
+function mockupScale(url) {
+  try {
+    const parsed = new URL(url, location.href);
+    return parsed.hostname === "files.cdn.printful.com"
+      ? MOCKUP_SCALES[parsed.pathname.split("/").pop()] || 1 : 1;
+  } catch { return 1; }
+}
+
+function mockupMarkup(url, title, className = "", lazy = false) {
+  return `<div class="mockup-frame ${className}" style="--mockup-scale:${mockupScale(url)}"><img class="selected-product-image" src="${escapeHtml(url)}" alt="${escapeHtml(title)}" ${lazy ? 'loading="lazy"' : ""} decoding="async"></div>`;
+}
+
+async function renderCommissions() {
+  const grid = document.getElementById("commissionsGrid");
+  if (!grid) return;
+  try {
+    const { originals } = await fetchJson(`${API}/api/originals`);
+    const commissions = originals.filter((art) => art.isCommission);
+    grid.innerHTML = commissions.map((art) => `<article class="product-card original-card">
+      ${artworkImage(art, "original-art-image")}
+      <div class="product-info"><h3>${escapeHtml(art.title)}</h3><p class="commission-label">Commissioned work</p></div>
+    </article>`).join("");
+    if (!commissions.length) grid.closest("section").hidden = true;
+  } catch {
+    grid.innerHTML = '<p class="notice">Previous commissions are temporarily unavailable.</p>';
+  }
+}
+
 function renderPrintGallery(artworks, grid) {
   if (!artworks.length) { grid.innerHTML = "<p>No artworks are currently available.</p>"; return; }
   grid.innerHTML = artworks.map((artwork) => {
     const productCount = new Set(artwork.products.map((product) => product.productType)).size;
     return `
     <article class="product-card gallery-card">
-      ${artworkImage(artwork)}
+      ${artwork.imageUrl ? mockupMarkup(artwork.imageUrl, artwork.title, "gallery-mockup", true) : artworkImage(artwork)}
       <div class="product-info"><div class="product-title-row"><h3>${escapeHtml(artwork.title)}</h3><span class="product-count">${productCount} product${productCount === 1 ? "" : "s"}</span></div>${artworkPrintNote(artwork)}</div>
       <button type="button" class="view-products" data-artwork-key="${escapeHtml(artwork.key)}">View products</button>
     </article>`;
@@ -283,7 +315,7 @@ function productImageUrls(product) {
 function productPreviewMarkup(product) {
   const images = productImageUrls(product);
   if (!images.length) return `<div class="product-preview empty-preview">Product mockup unavailable</div>`;
-  return `<div class="product-preview"><img class="selected-product-image" src="${escapeHtml(images[0])}" alt="${escapeHtml(product.title)}"><div class="product-thumbnails">${images.map((url, index) => `<button type="button" class="product-thumbnail ${index === 0 ? "active" : ""}" data-image="${escapeHtml(url)}" aria-label="View product image ${index + 1}"><img src="${escapeHtml(url)}" alt=""></button>`).join("")}</div></div>`;
+  return `<div class="product-preview">${mockupMarkup(images[0], product.title)}<div class="product-thumbnails">${images.map((url, index) => `<button type="button" class="product-thumbnail ${index === 0 ? "active" : ""}" data-image="${escapeHtml(url)}" aria-label="View product image ${index + 1}"><img src="${escapeHtml(url)}" alt=""></button>`).join("")}</div></div>`;
 }
 
 function attachArtworkPurchaseHandlers(artworks) {
@@ -317,6 +349,7 @@ function attachArtworkPurchaseHandlers(artworks) {
         preview.outerHTML = productPreviewMarkup(product);
         layout.querySelectorAll(".product-thumbnail").forEach((thumbnail) => thumbnail.addEventListener("click", () => {
           layout.querySelector(".selected-product-image").src = thumbnail.dataset.image;
+          layout.querySelector(".mockup-frame").style.setProperty("--mockup-scale", mockupScale(thumbnail.dataset.image));
           layout.querySelectorAll(".product-thumbnail").forEach((item) => item.classList.toggle("active", item === thumbnail));
         }));
       };
@@ -476,6 +509,7 @@ const year = document.getElementById("year");
 if (year) year.textContent = new Date().getFullYear();
 loadSiteContent();
 renderOriginals();
+renderCommissions();
 renderPrints();
 
 // Reduce casual image saving without blocking normal text selection or checkout fields.
