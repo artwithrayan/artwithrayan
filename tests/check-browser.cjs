@@ -58,7 +58,11 @@ async function main() {
       for (const art of originalCatalog.originals) {
         const card = page.locator(`[data-original-id="${art.id}"]`);
         assert.equal(await card.locator(".price").count(), 0);
-        assert.doesNotMatch(await card.innerText(), /\$\s*\d/);
+        if (art.saleTerms) {
+          assert.match(await card.innerText(), art.id === "the-light" ? /\$500.*\$50 domestic shipping/ : /\$185.*\$45 domestic shipping/);
+          assert.match(await card.innerText(), art.id === "the-light" ? /\$550 USD including shipping/ : /\$230 USD including shipping/);
+          assert.match(await card.innerText(), /No international shipping at this time/);
+        } else assert.doesNotMatch(await card.innerText(), /\$\s*\d/);
         assert.equal(await card.locator(".commission-label").count(), art.isCommission ? 1 : 0);
         if (art.isCommission) {
           assert.equal(await card.locator(".commission-label").isVisible(), true);
@@ -74,6 +78,12 @@ async function main() {
         }
         assert.equal(await card.locator(".original-status").count(), 0);
         assert.equal(await card.locator(".original-ebay-auction").count(), 0);
+        if (art.saleTerms) {
+          assert.equal(await inquiry.count(), 0);
+          assert.equal(await card.locator(".original-stripe-checkout").textContent(), "Purchase original");
+          assert.equal(await card.locator(".original-stripe-checkout").isEnabled(), true);
+          continue;
+        }
         assert.equal(await inquiry.textContent(), "Make an offer");
         assert.equal(await inquiry.getAttribute("aria-label"), `Make an offer for ${art.title} by email`);
         const url = new URL(await inquiry.getAttribute("href"));
@@ -229,6 +239,23 @@ async function main() {
       await dogsCard.locator(".view-products").click();
       assert.equal(await dialog.locator(".print-product-note").count(), 0);
       await page.unroute("**/api/prints");
+      await page.goto(base + "/originals.html");
+      let checkoutBody;
+      await page.route("**/api/originals/sun-beam/checkout", async (route) => {
+        checkoutBody = route.request().postDataJSON();
+        await route.fulfill({ status: 502, contentType: "application/json", body: JSON.stringify({ error: "Please try again." }) });
+      });
+      const sunBeamPurchase = page.locator('[data-original-id="sun-beam"] .original-stripe-checkout');
+      await sunBeamPurchase.click();
+      await page.waitForFunction(() => document.querySelector('[data-original-id="sun-beam"] [data-original-checkout-notice]').textContent === "Please try again.");
+      assert.equal(checkoutBody.expectedTotal, 230);
+      assert.match(checkoutBody.checkoutToken, /^[a-f0-9-]{36}$/);
+      const savedToken = checkoutBody.checkoutToken;
+      assert.equal(await sunBeamPurchase.isEnabled(), true);
+      await sunBeamPurchase.click();
+      await page.waitForFunction(() => !document.querySelector('[data-original-id="sun-beam"] .original-stripe-checkout').disabled);
+      assert.equal(checkoutBody.checkoutToken, savedToken);
+      await page.screenshot({ path: path.join(output, `sun-beam-checkout-${width}.png`), fullPage: true });
       assert.deepEqual(errors, []);
       results.push({ width, checkoutInvalidation: true, staleResponseIgnored: true, reveal: true, originalEmailInquiries: true, internationalAddresses: true, lightPrintNote: true, sunBeamRotation: true });
       await context.close();

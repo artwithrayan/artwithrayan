@@ -132,7 +132,23 @@ function shippingBreakdownHtml(shipping) {
   `;
 }
 
+let originalRefreshTimer;
+let originalCheckoutPending = false;
+const originalCheckoutTokens = new Map();
+function originalCheckoutToken(id, create = false) {
+  let token = originalCheckoutTokens.get(id);
+  try { token ||= sessionStorage.getItem(`original-checkout-${id}`); } catch { /* In-memory checkout still works when storage is blocked. */ }
+  if (!token && create) token = crypto.randomUUID();
+  if (token) {
+    originalCheckoutTokens.set(id, token);
+    try { sessionStorage.setItem(`original-checkout-${id}`, token); } catch { /* Keep the token in memory. */ }
+  }
+  return token;
+}
+
 async function renderOriginals() {
+  clearTimeout(originalRefreshTimer);
+  if (originalCheckoutPending) return;
   const grid = document.getElementById("originalsGrid");
   if (!grid) return;
 
@@ -145,6 +161,9 @@ async function renderOriginals() {
     grid.innerHTML = originals.map((art) => {
       const isAvailable = ["active", "payment_pending"].includes(art.status);
       const inquiryUrl = `mailto:${inquiryEmail}`;
+      const sale = isAvailable ? art.saleTerms : null;
+      const inquiryLabel = sale ? "Email to purchase" : "Make an offer";
+      const inquiryDescription = sale ? `Purchase ${art.title} by email` : `Make an offer for ${art.title} by email`;
 
       return `
         <article class="product-card original-card" data-original-id="${escapeHtml(art.id)}">
@@ -154,19 +173,47 @@ async function renderOriginals() {
             <p class="product-meta">${[art.medium, art.size, art.year].filter(Boolean).map(escapeHtml).join(" · ")}</p>
             ${art.isCommission ? '<p class="commission-label">Commissioned work</p>' : ""}
             <p>${escapeHtml(art.description)}</p>
+            ${sale ? `<div class="original-sale-terms"><p><strong>${money(sale.price)}</strong> + ${money(sale.shipping)} domestic shipping</p><p>${money(sale.price + sale.shipping)} USD including shipping</p><p class="original-shipping-restriction">US shipping only. No international shipping at this time.</p></div>` : ""}
           </div>
           ${art.revealImageUrl ? `<button type="button" class="shine-button" data-id="${escapeHtml(art.id)}" aria-pressed="false">Shine a light</button>` : ""}
           ${art.id === "sun-beam" ? '<button type="button" class="rotation-button" aria-label="Pause Sun Beam rotation" aria-pressed="true">Pause rotation</button>' : ""}
-          ${isAvailable ? `<a class="button original-inquiry" href="${escapeHtml(inquiryUrl)}" aria-label="${escapeHtml(`Make an offer for ${art.title} by email`)}">Make an offer</a><a class="original-contact-email" href="${escapeHtml(inquiryUrl)}">${escapeHtml(inquiryEmail)}</a>` : ""}
+          ${sale ? `<button type="button" class="original-stripe-checkout" data-id="${escapeHtml(art.id)}" data-total="${sale.price + sale.shipping}" ${art.status === "payment_pending" && !originalCheckoutToken(art.id) ? "disabled" : ""}>${art.status === "payment_pending" ? originalCheckoutToken(art.id) ? "Continue checkout" : "Temporarily reserved" : "Purchase original"}</button><p class="notice" data-original-checkout-notice role="status"></p>` : ""}
+          ${isAvailable ? `${sale ? "" : `<a class="button original-inquiry" href="${escapeHtml(inquiryUrl)}" aria-label="${escapeHtml(inquiryDescription)}">${inquiryLabel}</a>`}<a class="original-contact-email" href="${escapeHtml(inquiryUrl)}">${escapeHtml(inquiryEmail)}</a>` : ""}
         </article>`;
     }).join("");
     attachRevealHandlers();
     attachRotationHandlers();
     attachOriginalShippingEstimates();
+    attachOriginalCheckout();
+    if (originals.some((art) => art.status === "payment_pending")) originalRefreshTimer = setTimeout(() => { if (!document.hidden) renderOriginals(); }, 30000);
   } catch (error) {
     grid.innerHTML = `<p class="notice error">Could not load originals. Make sure the backend is running.</p>`;
   }
 }
+
+function attachOriginalCheckout() {
+  document.querySelectorAll(".original-stripe-checkout").forEach((button) => button.addEventListener("click", async () => {
+    if (originalCheckoutPending) return;
+    const notice = button.closest(".original-card").querySelector("[data-original-checkout-notice]");
+    originalCheckoutPending = true;
+    button.disabled = true;
+    notice.textContent = "Opening secure checkout...";
+    try {
+      const result = await fetchJson(`${API}/api/originals/${encodeURIComponent(button.dataset.id)}/checkout`, {
+        method: "POST", body: JSON.stringify({ checkoutToken: originalCheckoutToken(button.dataset.id, true), expectedTotal: Number(button.dataset.total) })
+      });
+      if (new URL(result.checkoutUrl).origin !== "https://checkout.stripe.com") throw new Error("Checkout is unavailable. Please contact us.");
+      window.location.assign(result.checkoutUrl);
+    } catch (error) {
+      notice.textContent = error.message;
+      notice.className = "notice error";
+      button.disabled = false;
+    } finally { originalCheckoutPending = false; }
+  }));
+}
+
+window.addEventListener("pageshow", (event) => { if (event.persisted) renderOriginals(); });
+document.addEventListener("visibilitychange", () => { if (!document.hidden && document.getElementById("originalsGrid")) renderOriginals(); });
 
 function attachOriginalShippingEstimates() {
   document.querySelectorAll(".original-shipping-form").forEach((form) => {

@@ -16,6 +16,7 @@ Object.assign(process.env, {
 });
 
 const sessions = new Map();
+const checkoutKeys = new Map();
 const calls = { drafts: 0, sheets: 0, emails: 0, refunds: 0, checkouts: 0 };
 const failures = { drafts: false, sheets: false, emails: false };
 const sdk = new RealStripe("sk_test_local_fixture");
@@ -23,13 +24,17 @@ class StripeMock {
   constructor() {
     this.webhooks = sdk.webhooks;
     this.checkout = { sessions: {
-      create: async (config) => {
+      create: async (config, options = {}) => {
+        if (options.idempotencyKey && checkoutKeys.has(options.idempotencyKey)) return sessions.get(checkoutKeys.get(options.idempotencyKey));
+        if (failures.checkout === "reject") throw Object.assign(new Error("Rejected test checkout"), { type: "StripeInvalidRequestError" });
         calls.checkouts++;
         const id = `cs_test_${calls.checkouts}`;
-        const session = { ...config, id, url: `https://example.invalid/${id}`, status: "open", payment_status: "unpaid", currency: "usd",
-          amount_total: (config.line_items || []).reduce((sum, line) => sum + line.price_data.unit_amount * line.quantity, 0),
+        const session = { ...config, id, url: `https://checkout.stripe.com/c/pay/${id}`, status: "open", payment_status: "unpaid", currency: "usd",
+          amount_total: (config.line_items || []).reduce((sum, line) => sum + line.price_data.unit_amount * line.quantity, 0) + (config.shipping_options?.[0]?.shipping_rate_data?.fixed_amount?.amount || 0),
           payment_intent: { id: `pi_${id}`, latest_charge: { refunded: false, amount_refunded: 0 } } };
         sessions.set(id, session);
+        if (options.idempotencyKey) checkoutKeys.set(options.idempotencyKey, id);
+        if (failures.checkout === "lost") throw Object.assign(new Error("Lost test response"), { type: "StripeConnectionError" });
         return session;
       },
       retrieve: async (id) => {

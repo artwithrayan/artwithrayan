@@ -367,6 +367,7 @@ test("Sun Beam is added to existing catalogs without resetting availability on r
   assert.equal(original.size, "12-inch diameter");
   assert.equal(original.widthIn, 12);
   assert.equal(original.heightIn, 12);
+  assert.equal(original.price, 185);
   assert.equal(Object.hasOwn(original, "autoChargeEnabled"), false);
   const reload = () => {
     const result = spawnSync(process.execPath, ["-e", "require('./src/db')"], { cwd: path.resolve(__dirname, ".."), env: process.env, encoding: "utf8" });
@@ -423,6 +424,9 @@ test("original listings omit public prices while preserving internal records and
     assert.equal(Object.hasOwn(art, "price"), false);
     assert.equal(Object.hasOwn(art, "startingBid"), false);
     assert.equal(art.title, f.db.getOriginalById(art.id).title);
+    if (art.id === "sun-beam") assert.deepEqual(art.saleTerms, { price: 185, shipping: 45, currency: "USD", country: "US" });
+    else if (art.id === "the-light") assert.deepEqual(art.saleTerms, { price: 500, shipping: 50, currency: "USD", country: "US" });
+    else assert.equal(art.saleTerms, undefined);
   }
   const detail = await (await fetch(`${base}/api/originals/the-light`)).json();
   assert.equal(Object.hasOwn(detail.original, "price"), false);
@@ -431,11 +435,11 @@ test("original listings omit public prices while preserving internal records and
   assert.deepEqual(f.db.getOriginals(), storedOriginals);
 });
 
-test("original checkout and shipping endpoints cannot create orders or reservations", async () => {
+test("inquiry-only originals cannot create orders or reservations", async () => {
   const paymentsBefore = f.sql.prepare("SELECT COUNT(*) AS count FROM payments").get().count;
   const artBefore = f.db.getOriginalById("the-light");
   const checkoutsBefore = f.calls.checkouts;
-  for (const id of ["the-light", "unknown-original"]) {
+  for (const id of ["flower", "unknown-original"]) {
     for (const endpoint of ["checkout", "shipping-rate"]) {
       const response = await fetch(`${base}/api/originals/${id}/${endpoint}`, {
         method: "POST", headers: { "Content-Type": "application/json" }, body: "{}"
@@ -459,7 +463,7 @@ test("original shipping estimates never create payments, reservations, or carrie
   for (const [id, body, status] of [
     ["the-light", { country: "US", state: "NC", total: 1, weightLb: 0 }, 200],
     ["sun-beam", { country: "US", state: "CA" }, 200],
-    ["sun-beam", { country: "OTHER" }, 200],
+    ["sun-beam", { country: "OTHER" }, 400],
     ["the-light", { country: "US", state: "XX" }, 400],
     ["flower", { country: "US", state: "NC" }, 400],
     ["jazz-club", { country: "US", state: "NC" }, 409],
@@ -467,7 +471,8 @@ test("original shipping estimates never create payments, reservations, or carrie
   ]) {
     const response = await fetch(`${base}/api/originals/${id}/shipping-estimate`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
     assert.equal(response.status, status);
-    if (id === "the-light" && status === 200) assert.equal((await response.json()).estimate.total, 45);
+    if (id === "the-light" && status === 200) assert.equal((await response.json()).estimate.total, 50);
+    if (id === "sun-beam" && status === 200) assert.equal((await response.json()).estimate.total, 45);
   }
   assert.equal(f.sql.prepare("SELECT COUNT(*) AS count FROM payments").get().count, before);
   assert.deepEqual(f.db.getOriginals(), originals);
@@ -490,4 +495,126 @@ test("local clock cleanup never releases a real Stripe session prematurely", () 
   f.db.releaseStaleCheckoutReservations();
   assert.equal(f.db.getOriginalById("the-light").status, "payment_pending");
   f.db.cancelCheckoutReservation(payment.stripe_session_id);
+});
+
+async function originalCheckout(token, extra = {}, id = "sun-beam") {
+  return fetch(`${base}/api/originals/${id}/checkout`, { method: "POST",
+    headers: { "Content-Type": "application/json", "X-Forwarded-For": "192.0.2.45" },
+    body: JSON.stringify({ checkoutToken: token, expectedTotal: 230, ...extra }) });
+}
+
+test("Sun Beam Stripe checkout is fixed-price, US-only, resumable and single-stock", async () => {
+  const token = require("node:crypto").randomUUID();
+  const drafts = f.calls.drafts;
+  assert.equal((await originalCheckout(token, { expectedTotal: 1 })).status, 409);
+  assert.equal((await originalCheckout("bad-token")).status, 400);
+  const response = await originalCheckout(token, { price: 1, shipping: 0, country: "AE" });
+  assert.equal(response.status, 200);
+  const url = (await response.json()).checkoutUrl;
+  let payment = f.db.getLatestPaymentForOriginal("sun-beam");
+  const session = f.sessions.get(payment.stripe_session_id);
+  assert.equal(session.line_items[0].price_data.unit_amount, 18500);
+  assert.equal(session.shipping_options[0].shipping_rate_data.fixed_amount.amount, 4500);
+  assert.equal(session.amount_total, 23000);
+  assert.deepEqual(session.shipping_address_collection.allowed_countries, ["US"]);
+  assert.deepEqual(session.payment_method_types, ["card"]);
+  assert.equal(payment.total_amount, 230);
+  assert.equal(f.db.getOriginalById("sun-beam").status, "payment_pending");
+  const count = f.calls.checkouts;
+  assert.equal((await (await originalCheckout(token)).json()).checkoutUrl, url);
+  assert.equal(f.calls.checkouts, count);
+  assert.equal((await originalCheckout(require("node:crypto").randomUUID())).status, 409);
+  assert.equal((await webhook("checkout.session.completed", session)).status, 200);
+  assert.equal(f.db.getOriginalById("sun-beam").status, "payment_pending");
+  session.payment_status = "paid";
+  session.status = "complete";
+  session.customer_details = { email: "buyer@example.com", phone: "+19195550123" };
+  session.collected_information = { shipping_details: { name: "Test Buyer", address: {
+    line1: "1 E Edenton St", line2: "Unit 2", city: "Raleigh", state: "NC", postal_code: "27601", country: "US"
+  } } };
+  assert.equal((await webhook("checkout.session.completed", session)).status, 200);
+  payment = f.db.getPaymentById(payment.id);
+  assert.equal(payment.status, "paid");
+  assert.equal(payment.customer_email, "buyer@example.com");
+  assert.equal(JSON.parse(payment.shipping_json).recipient.address2, "Unit 2");
+  assert.ok(payment.google_sheets_synced_at);
+  assert.equal(f.calls.drafts, drafts);
+  assert.equal(f.db.getOriginalById("sun-beam").status, "sold");
+  assert.equal((await (await fetch(`${base}/api/originals/sun-beam`)).json()).original.saleTerms, undefined);
+  const sheetCount = f.calls.sheets;
+  assert.equal((await webhook("checkout.session.completed", session)).status, 200);
+  assert.equal(f.calls.sheets, sheetCount);
+  assert.equal((await originalCheckout(token)).status, 409);
+  f.sql.prepare("DELETE FROM payments WHERE id=?").run(payment.id);
+  f.db.markOriginalStatus("sun-beam", "active");
+});
+
+test("original expiry releases stock and lost Stripe responses retry without duplicate sessions", async () => {
+  const token = require("node:crypto").randomUUID();
+  f.failures.checkout = "reject";
+  assert.equal((await originalCheckout(token)).status, 502);
+  assert.equal(f.db.getOriginalById("sun-beam").status, "active");
+  f.failures.checkout = "lost";
+  assert.equal((await originalCheckout(token)).status, 502);
+  assert.equal(f.db.getOriginalById("sun-beam").status, "payment_pending");
+  const payment = f.db.getLatestPaymentForOriginal("sun-beam");
+  assert.ok(JSON.parse(payment.shipping_json).checkoutConfig);
+  const count = f.calls.checkouts;
+  f.failures.checkout = "";
+  // Recover a lost response using the stored configuration and idempotency key.
+  f.sql.prepare("UPDATE payments SET checkout_expires_at=1 WHERE id=?").run(payment.id);
+  await f.orders.tick();
+  const recovered = f.db.getPaymentById(payment.id);
+  assert.match(recovered.stripe_session_id, /^cs_/);
+  assert.equal(f.calls.checkouts, count);
+  const session = f.sessions.get(recovered.stripe_session_id);
+  session.status = "expired";
+  assert.equal((await webhook("checkout.session.expired", session)).status, 200);
+  assert.equal(f.db.getOriginalById("sun-beam").status, "active");
+  assert.equal(f.db.getPaymentById(payment.id).status, "cancelled");
+});
+
+test("original payments with an unexpected total or non-US address are refunded, not fulfilled", async () => {
+  for (const [country, amount] of [["AE", 23000], ["US", 100]]) {
+    const token = require("node:crypto").randomUUID();
+    assert.equal((await originalCheckout(token)).status, 200);
+    const payment = f.db.getLatestPaymentForOriginal("sun-beam");
+    const session = f.sessions.get(payment.stripe_session_id);
+    Object.assign(session, { payment_status: "paid", status: "complete", amount_total: amount,
+      customer_details: { email: "buyer@example.com" },
+      shipping_details: { name: "Test Buyer", address: { line1: "Test street", city: "Test city", state: "NC", postal_code: "27601", country } }
+    });
+    const refunds = f.calls.refunds;
+    assert.equal((await webhook("checkout.session.completed", session)).status, 200);
+    assert.equal(f.calls.refunds, refunds + 1);
+    assert.equal(f.db.getPaymentById(payment.id).status, "refunded");
+    assert.equal(f.db.getOriginalById("sun-beam").status, "active");
+  }
+});
+
+test("The Light checks out for $500 plus $50 shipping without reserving Sun Beam", async () => {
+  const token = require("node:crypto").randomUUID();
+  const sunBeamStatus = f.db.getOriginalById("sun-beam").status;
+  assert.equal(f.db.getOriginalById("the-light").price, 500);
+  assert.equal((await originalCheckout(token, {}, "the-light")).status, 409);
+  const response = await originalCheckout(token, { expectedTotal: 550 }, "the-light");
+  assert.equal(response.status, 200);
+  const payment = f.db.getLatestPaymentForOriginal("the-light");
+  const session = f.sessions.get(payment.stripe_session_id);
+  assert.equal(session.line_items[0].price_data.product_data.name, "The Light");
+  assert.equal(session.line_items[0].price_data.unit_amount, 50000);
+  assert.equal(session.shipping_options[0].shipping_rate_data.fixed_amount.amount, 5000);
+  assert.equal(session.amount_total, 55000);
+  assert.equal(session.metadata.originalId, "the-light");
+  assert.deepEqual(session.shipping_address_collection.allowed_countries, ["US"]);
+  assert.equal(f.db.getOriginalById("sun-beam").status, sunBeamStatus);
+  Object.assign(session, { payment_status: "paid", status: "complete", customer_details: { email: "light-buyer@example.com" },
+    collected_information: { shipping_details: { name: "Test Buyer", address: { line1: "1 E Edenton St", city: "Raleigh", state: "NC", postal_code: "27601", country: "US" } } }
+  });
+  assert.equal((await webhook("checkout.session.completed", session)).status, 200);
+  assert.equal(f.db.getOriginalById("the-light").status, "sold");
+  assert.equal(f.db.getPaymentById(payment.id).total_amount, 550);
+  assert.ok(f.db.getPaymentById(payment.id).google_sheets_synced_at);
+  f.sql.prepare("DELETE FROM payments WHERE id=?").run(payment.id);
+  f.db.markOriginalStatus("the-light", "active");
 });

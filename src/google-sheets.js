@@ -105,7 +105,7 @@ function shippingFields(payment) {
   try {
     const parsed = JSON.parse(payment.shipping_json || "{}");
     const recipient = parsed.recipient || {};
-    return [recipient.address1 || "", recipient.city || "", recipient.state_code || "", recipient.zip || "", recipient.country_code || ""];
+    return [[recipient.address1, recipient.address2].filter(Boolean).join(", "), recipient.city || "", recipient.state_code || "", recipient.zip || "", recipient.country_code || ""];
   } catch {
     return ["", "", "", "", ""];
   }

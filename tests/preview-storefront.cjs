@@ -9,6 +9,7 @@ async function main() {
   const app = express();
   app.get("/api/prints", (req, res) => res.json(catalog));
   app.post("/api/prints/:id/checkout", (req, res) => res.status(403).json({ error: "Purchases are disabled in this local visual preview." }));
+  app.post("/api/originals/:id/checkout", (req, res) => res.status(403).json({ error: "Purchases are disabled in this local visual preview." }));
   app.use(f.app);
   const server = app.listen(Number(process.env.PREVIEW_PORT || 3118), "127.0.0.1");
   server.on("error", (error) => {

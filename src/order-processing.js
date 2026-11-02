@@ -83,7 +83,23 @@ function createOrderProcessor({ db, stripe, printful, sheets, email }) {
       if (stripe) {
         for (const payment of db.getPendingCheckoutPayments()) {
           try {
-            const session = await stripe.checkout.sessions.retrieve(payment.stripe_session_id);
+            let session;
+            if (payment.kind === "original" && payment.stripe_session_id.startsWith("unconfirmed-original-")) {
+              const config = JSON.parse(payment.shipping_json || "{}").checkoutConfig;
+              if (!config) {
+                db.cancelCheckoutReservation(payment.stripe_session_id);
+                continue;
+              }
+              try {
+                session = await stripe.checkout.sessions.create(config, { idempotencyKey: `original-checkout-${payment.id}` });
+              } catch (error) {
+                // An old fixed-expiry session cannot still be used for a new payment.
+                // Unknown network outcomes stay reserved until Stripe responds.
+                if (error.type === "StripeInvalidRequestError" && Date.now() > (config.expires_at + 60) * 1000) db.cancelCheckoutReservation(payment.stripe_session_id);
+                throw error;
+              }
+              db.setPaymentCheckoutSession(payment.id, session.id, session.url, session.expires_at);
+            } else session = await stripe.checkout.sessions.retrieve(payment.stripe_session_id);
             if (String(session.metadata?.flow || "").startsWith("art_auction_") || String(session.metadata?.kind || "").includes("auction") || session.metadata?.bidId) continue;
             if (session.payment_status === "paid") db.confirmCheckoutPayment(session);
             else if (session.status === "expired") db.cancelCheckoutReservation(session.id);

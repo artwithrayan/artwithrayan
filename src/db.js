@@ -1,6 +1,6 @@
 const path = require("path");
 const Database = require("better-sqlite3");
-const { parseSizeInches, estimateOriginalShipping } = require("./shipping");
+const { parseSizeInches, estimateOriginalShipping, ORIGINAL_OFFERS } = require("./shipping");
 
 const dbPath = process.env.DB_PATH || path.join(__dirname, "..", "data.sqlite");
 const db = new Database(dbPath);
@@ -275,6 +275,10 @@ db.prepare(`
   description: "An original circular painting of sunlight falling across a forest floor.",
   imageUrl: "/images/sun-beam.jpeg"
 });
+
+for (const [id, offer] of Object.entries(ORIGINAL_OFFERS)) {
+  db.prepare("UPDATE originals SET price=? WHERE id=? AND status IN ('active', 'payment_pending')").run(offer.price, id);
+}
 
 db.prepare(`
   INSERT OR IGNORE INTO originals
@@ -731,11 +735,25 @@ const confirmCheckoutPayment = db.transaction((session) => {
   if (session.payment_status !== "paid") return payment;
   if (session.currency !== "usd" || !Number.isInteger(session.amount_total) || session.amount_total <= 0) throw new Error("Invalid paid checkout amount or currency.");
   let conflict = false;
+  const hostedOriginal = payment.kind === "original" && session.metadata?.flow === "original_fixed_price";
+  if (hostedOriginal) {
+    const shipping = session.collected_information?.shipping_details || session.shipping_details;
+    const address = shipping?.address;
+    const customer = session.customer_details || {};
+    if (!shipping?.name || !address?.line1 || !address?.city || !address?.country || !customer.email) throw new Error("Original checkout shipping or customer details are missing.");
+    conflict = address.country !== "US" || session.amount_total !== Math.round(payment.total_amount * 100);
+    const previous = JSON.parse(payment.shipping_json || "{}");
+    const recipient = { name: shipping.name, email: customer.email, phone: customer.phone || "", address1: address.line1,
+      address2: address.line2 || "", city: address.city, state_code: address.state || "", zip: address.postal_code || "", country_code: address.country };
+    db.prepare("UPDATE payments SET customer_name=?,customer_email=?,shipping_json=? WHERE id=?")
+      .run(shipping.name, customer.email, JSON.stringify({ ...previous, recipient }), payment.id);
+  }
   if (payment.kind === "original") {
     const art = db.prepare(`SELECT status,reservation_payment_id FROM originals WHERE id=?`).get(payment.original_id);
-    conflict = !art || Boolean(getPaidPaymentForOriginal(payment.original_id)) ||
+    conflict = conflict || !art || Boolean(getPaidPaymentForOriginal(payment.original_id)) ||
       !(art.status === "active" || (art.status === "payment_pending" && art.reservation_payment_id === payment.id));
     if (!conflict) db.prepare(`UPDATE originals SET status='sold', reservation_payment_id=NULL, updated_at=CURRENT_TIMESTAMP WHERE id=?`).run(payment.original_id);
+    else if (hostedOriginal) releaseOriginalCheckout(payment.original_id, payment.id);
   } else if (payment.kind === "print") {
     const print = getPrintById(payment.print_id);
     if (print?.fulfillmentType === "self" && print.stockQuantity !== null) {
@@ -876,7 +894,7 @@ function getLatestPaymentForOriginal(originalId) {
   return db.prepare(`
     SELECT * FROM payments
     WHERE original_id=?
-    ORDER BY created_at DESC
+    ORDER BY created_at DESC, id DESC
     LIMIT 1
   `).get(originalId);
 }

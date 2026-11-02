@@ -14,7 +14,7 @@ const db = require("./src/db");
 const email = require("./src/email");
 const printful = require("./src/printful");
 const sheets = require("./src/google-sheets");
-const { estimateSelfFulfillmentShipping, hasOriginalShippingProfile, estimateOriginalDestinationShipping } = require("./src/shipping");
+const { estimateSelfFulfillmentShipping, hasOriginalShippingProfile, estimateOriginalDestinationShipping, getOriginalOffer } = require("./src/shipping");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -223,7 +223,9 @@ app.get("/api/health", (req, res) => res.json({
 app.get("/api/site-content", (req, res) => res.json({ content: db.getSiteContent() }));
 
 function publicOriginalDetails({ price, startingBid, ...art }) {
-  return { ...art, canEstimateShipping: hasOriginalShippingProfile(art.id) && ["active", "payment_pending"].includes(art.status) };
+  const available = ["active", "payment_pending"].includes(art.status);
+  return { ...art, canEstimateShipping: hasOriginalShippingProfile(art.id) && available,
+    ...(getOriginalOffer(art.id) && available ? { saleTerms: getOriginalOffer(art.id) } : {}) };
 }
 
 app.get("/api/originals", (req, res) => {
@@ -246,6 +248,81 @@ app.post("/api/originals/:id/shipping-estimate", quoteRateLimit, (req, res) => {
     res.json({ estimate: estimateOriginalDestinationShipping(art.id, req.body || {}) });
   } catch (error) {
     res.status(error.statusCode || 400).json({ error: publicErrorMessage(error, "Please email for a shipping quote.") });
+  }
+});
+
+app.post("/api/originals/:id/checkout", checkoutRateLimit, async (req, res, next) => {
+  const originalId = req.params.id;
+  const offer = getOriginalOffer(originalId);
+  if (!offer) return next();
+  const artwork = db.getOriginalById(originalId);
+  if (!artwork) return res.status(404).json({ error: "Original artwork not found." });
+  if (!requireStripe(res)) return;
+  const token = req.body?.checkoutToken;
+  if (typeof token !== "string" || !validator.isUUID(token, 4)) return res.status(400).json({ error: "Please refresh the page and try again." });
+  const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
+  const total = offer.price + offer.shipping;
+  if (Number(req.body.expectedTotal) !== total) return res.status(409).json({ error: "The price changed. Please refresh the page." });
+  let payment;
+  let newlyCreated = false;
+  try {
+    // Reserve inventory and create its owner together, before calling Stripe.
+    payment = db.sqlite.transaction(() => {
+      const art = db.getOriginalById(originalId);
+      if (art?.status === "payment_pending") {
+        const existing = db.getLatestPaymentForOriginal(originalId);
+        if (existing?.status === "pending" && JSON.parse(existing.shipping_json || "{}").checkoutTokenHash === tokenHash) return existing;
+        return null;
+      }
+      if (!art || !db.reserveOriginalCheckout(originalId)) return null;
+      const record = db.createPayment({ kind: "original", originalId,
+        stripeSessionId: `unconfirmed-original-${crypto.randomUUID()}`, checkoutUrl: "pending",
+        subtotalAmount: offer.price, shippingAmount: offer.shipping, totalAmount: total, amount: total,
+        shippingJson: { checkoutTokenHash: tokenHash, method: "DOMESTIC_FLAT", name: "US domestic shipping", rate: offer.shipping, currency: "USD" } });
+      db.setOriginalReservationOwner(originalId, record.id);
+      db.setPaymentCheckoutSession(record.id, record.stripe_session_id, "pending", Math.floor(Date.now() / 1000) + 31 * 60);
+      newlyCreated = true;
+      return db.getPaymentById(record.id);
+    })();
+    if (!payment) return res.status(409).json({ error: "This original is sold or temporarily reserved by another customer. Please check back shortly." });
+    let session;
+    if (payment.stripe_session_id.startsWith("cs_")) {
+      session = await stripe.checkout.sessions.retrieve(payment.stripe_session_id);
+    } else {
+      const shipping = JSON.parse(payment.shipping_json);
+      const sessionConfig = shipping.checkoutConfig || {
+        mode: "payment", payment_method_types: ["card"],
+        line_items: [{ price_data: { currency: "usd", unit_amount: Math.round(payment.subtotal_amount * 100), product_data: {
+          name: artwork.title, description: `${artwork.medium} - ${artwork.size}`
+        } }, quantity: 1 }],
+        shipping_address_collection: { allowed_countries: ["US"] },
+        shipping_options: [{ shipping_rate_data: { type: "fixed_amount", fixed_amount: { amount: Math.round(payment.shipping_amount * 100), currency: "usd" }, display_name: "US domestic shipping" } }],
+        metadata: { kind: "original", flow: "original_fixed_price", originalId, localPaymentId: String(payment.id) },
+        client_reference_id: String(payment.id), expires_at: payment.checkout_expires_at,
+        success_url: `${BASE_URL}/success.html?session_id={CHECKOUT_SESSION_ID}`,
+        cancel_url: `${BASE_URL}/originals.html`
+      };
+      db.sqlite.prepare("UPDATE payments SET shipping_json=? WHERE id=?").run(JSON.stringify({ ...shipping, checkoutConfig: sessionConfig }), payment.id);
+      session = await stripe.checkout.sessions.create(sessionConfig, { idempotencyKey: `original-checkout-${payment.id}` });
+      db.setPaymentCheckoutSession(payment.id, session.id, session.url, session.expires_at);
+    }
+    if (session.status === "expired") {
+      db.cancelCheckoutReservation(session.id);
+      return res.status(409).json({ error: "Your checkout expired. Please try again to start a new checkout." });
+    }
+    if (session.payment_status === "paid" || session.status === "complete") return res.status(409).json({ error: "This checkout has already completed. Please refresh the page." });
+    if (!session.url || new URL(session.url).origin !== "https://checkout.stripe.com") throw new Error("Stripe checkout URL unavailable.");
+    return res.json({ checkoutUrl: session.url });
+  } catch (error) {
+    // A timeout may hide a successfully created session. Keep the reservation and
+    // retry with the same idempotency key; never free inventory on an unknown result.
+    if (payment && newlyCreated && ["StripeInvalidRequestError", "StripeAuthenticationError", "StripePermissionError"].includes(error.type)
+      && payment.stripe_session_id.startsWith("unconfirmed-original-")) {
+      db.markPaymentFailed(payment.stripe_session_id, "Stripe rejected checkout creation.");
+      db.releaseOriginalCheckout(originalId, payment.id);
+    }
+    logger.error("Original checkout could not be opened:", error);
+    return res.status(502).json({ error: "Could not open checkout. Please try again or contact us." });
   }
 });
 

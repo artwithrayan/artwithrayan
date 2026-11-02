@@ -112,6 +112,15 @@ function estimateSelfFulfillmentShipping(product, recipient = {}) {
   };
 }
 
+const ORIGINAL_OFFERS = Object.freeze({
+  "sun-beam": Object.freeze({ price: 185, shipping: 45, currency: "USD", country: "US" }),
+  "the-light": Object.freeze({ price: 500, shipping: 50, currency: "USD", country: "US" })
+});
+
+function getOriginalOffer(id) {
+  return Object.hasOwn(ORIGINAL_OFFERS, id) ? ORIGINAL_OFFERS[id] : null;
+}
+
 const ORIGINAL_SHIPPING_PROFILES = {
   "the-light": { weightLb: 4, packingAllowance: 14 },
   "sun-beam": { weightLb: 4, packingAllowance: 16 }
@@ -132,6 +141,13 @@ function estimateOriginalDestinationShipping(id, destination = {}) {
   if (!hasOriginalShippingProfile(id)) throw Object.assign(new Error("Shipping for this artwork is quoted by email."), { statusCode: 400 });
   const country = String(destination.country || "").trim().toUpperCase();
   const state = String(destination.state || "").trim().toUpperCase();
+  const offer = getOriginalOffer(id);
+  if (offer) {
+    if (country !== "US") throw Object.assign(new Error("This original ships within the United States only. No international shipping at this time."), { statusCode: 400 });
+    if (!["AK", "HI", ...ORIGINAL_DESTINATION_BANDS.flatMap((band) => band.states)].includes(state)) throw Object.assign(new Error("Choose a valid destination state."), { statusCode: 400 });
+    return { requiresManualQuote: false, total: offer.shipping, currency: "USD", flatRate: true,
+      note: "Flat domestic shipping fee. No international shipping at this time." };
+  }
   if (!["US", "OTHER"].includes(country)) throw Object.assign(new Error("Choose a shipping destination."), { statusCode: 400 });
   if (country === "OTHER" || ["AK", "HI"].includes(state)) return {
     requiresManualQuote: true,
@@ -152,6 +168,8 @@ function estimateOriginalDestinationShipping(id, destination = {}) {
 }
 
 module.exports = {
+  ORIGINAL_OFFERS,
+  getOriginalOffer,
   parseSizeInches,
   estimateOriginalShipping,
   estimateSelfFulfillmentShipping,
