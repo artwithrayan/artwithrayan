@@ -195,7 +195,15 @@ async function main() {
       assert.equal(await dialog.locator('[name="phone"]').getAttribute("required"), null);
 
       const printCatalog = await (await fetch(base + "/api/prints")).json();
-      const artwork = printCatalog.artworks[0];
+      const artwork = { ...printCatalog.artworks[0], products: printCatalog.artworks[0].products.map((product) => ({
+        ...product,
+        printfulOptions: [
+          { id: "embroidery_type", value: "flat" },
+          { id: "thread_colors", value: [] },
+          { id: "lifelike", value: false },
+          { id: "license_type", value: "" }
+        ]
+      })) };
       const lightArtwork = { ...artwork, key: "the-light", title: "The Light", products: [...artwork.products, { ...artwork.products[0], id: "test-canvas", productType: "Canvas", sizes: "8x10" }] };
       await page.route("**/api/prints", (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ artworks: [lightArtwork, { ...artwork, key: "dogs-playing-poker", title: "Dogs Playing Poker" }] }) }));
       await page.goto(base + "/prints.html");
@@ -205,10 +213,13 @@ async function main() {
       assert.equal(await lightCard.locator(".print-product-note").innerText(), printNote);
       assert.equal(await dogsCard.locator(".print-product-note").count(), 0);
       await lightCard.locator(".view-products").click();
+      assert.equal(await dialog.locator(".product-options").count(), 0);
+      assert.doesNotMatch(await dialog.innerText(), /embroidery type|thread colors|lifelike|license type/i);
       assert.equal(await dialog.locator(".print-product-note").innerText(), printNote);
       await dialog.locator(".variant-button").last().click();
       assert.equal(await dialog.locator(".print-product-note").innerText(), printNote);
       await dialog.locator(".product-choice").selectOption("Canvas");
+      assert.doesNotMatch(await dialog.innerText(), /embroidery type|thread colors|lifelike|license type/i);
       assert.equal(await dialog.locator(".print-product-note").innerText(), printNote);
       assert.equal(await dialog.locator(".print-product-note").evaluate((element) => getComputedStyle(element).fontSize), "12px");
       assert.equal(await dialog.evaluate((element) => element.scrollWidth > element.clientWidth + 1), false);
